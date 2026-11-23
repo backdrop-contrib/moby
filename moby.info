@@ -1,0 +1,9 @@
+name = Moby
+description = Provides a REST API for creating posts with photos, videos, and locations from the Moby app.
+package = Web Services
+type = module
+backdrop = 1.x
+dependencies[] = node
+dependencies[] = file
+dependencies[] = image
+configure = admin/config/services/moby

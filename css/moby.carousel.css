@@ -1,0 +1,201 @@
+/**
+ * @file
+ * The Moby Carousel.
+ *
+ * Themes can change its colors and size with these custom properties:
+ * - --moby-carousel-background: Behind photos and videos that don't fill the
+ *   slide.
+ * - --moby-carousel-max-height: The tallest the slides get.
+ * - --moby-carousel-radius: The corner radius.
+ * - --moby-carousel-control: The buttons' and dots' color.
+ * - --moby-carousel-control-background: The buttons' background.
+ * - --moby-carousel-focus: The focus outline color.
+ */
+.moby-carousel {
+  --moby-carousel-background: #ebe8e4;
+  --moby-carousel-max-height: 80vh;
+  --moby-carousel-radius: 8px;
+  --moby-carousel-control: #1f1b18;
+  --moby-carousel-control-background: rgba(255, 255, 255, 0.92);
+  --moby-carousel-focus: #1565c0;
+  position: relative;
+  max-width: 100%;
+  margin: 0 0 1.5em;
+}
+
+/* The slides, side by side, scrolling sideways and snapping to each one. */
+.moby-carousel-viewport {
+  display: flex;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scroll-snap-type: x mandatory;
+  overscroll-behavior-x: contain;
+  border-radius: var(--moby-carousel-radius);
+  background: var(--moby-carousel-background);
+}
+.moby-carousel-viewport:focus-visible {
+  outline: 3px solid var(--moby-carousel-focus);
+  outline-offset: 2px;
+}
+.moby-carousel--enhanced .moby-carousel-viewport {
+  scrollbar-width: none;
+}
+.moby-carousel--enhanced .moby-carousel-viewport::-webkit-scrollbar {
+  display: none;
+}
+
+.moby-carousel-slide {
+  display: flex;
+  flex: 0 0 100%;
+  align-items: center;
+  justify-content: center;
+  min-width: 0;
+  aspect-ratio: var(--moby-carousel-ratio, 4 / 3);
+  max-height: var(--moby-carousel-max-height);
+  scroll-snap-align: start;
+  scroll-snap-stop: always;
+}
+/* Photos and videos fit within the slide, whatever their shape. */
+.moby-carousel-slide img,
+.moby-carousel-slide video {
+  display: block;
+  width: auto;
+  height: 100%;
+  max-width: 100%;
+  object-fit: contain;
+  border-radius: 0;
+}
+.moby-carousel-slide--file {
+  padding: 1em;
+}
+
+/* One photo or video: shown at its own shape, no taller than the screen. */
+.moby-carousel--single .moby-carousel-viewport {
+  display: block;
+  overflow: visible;
+  background: none;
+}
+.moby-carousel--single .moby-carousel-slide {
+  display: block;
+  aspect-ratio: auto;
+  max-height: none;
+}
+.moby-carousel--single .moby-carousel-slide img,
+.moby-carousel--single .moby-carousel-slide video {
+  width: auto;
+  height: auto;
+  max-height: var(--moby-carousel-max-height);
+  margin: 0 auto;
+  border-radius: var(--moby-carousel-radius);
+}
+
+/* Previous and next buttons, over the sides of the slides. At least 44px, so
+   they're easy to tap. */
+.moby-carousel-stage {
+  position: relative;
+}
+.moby-carousel-buttons {
+  position: absolute;
+  z-index: 1;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  /* Taps between the buttons reach the slide. */
+  pointer-events: none;
+}
+.moby-carousel-buttons[hidden],
+.moby-carousel-dots[hidden],
+.moby-carousel-counter[hidden] {
+  display: none;
+}
+.moby-carousel .moby-carousel-button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  margin: 0 8px;
+  padding: 0;
+  border: 1px solid rgba(0, 0, 0, 0.35);
+  border-radius: 50%;
+  background: var(--moby-carousel-control-background);
+  color: var(--moby-carousel-control);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.25);
+  cursor: pointer;
+  pointer-events: auto;
+}
+.moby-carousel .moby-carousel-button:hover,
+.moby-carousel .moby-carousel-button:focus {
+  background: #fff;
+  color: var(--moby-carousel-control);
+}
+.moby-carousel-button:focus-visible,
+.moby-carousel-dot:focus-visible {
+  outline: 3px solid var(--moby-carousel-focus);
+  outline-offset: 2px;
+}
+.moby-carousel-button svg {
+  width: 24px;
+  height: 24px;
+  fill: currentColor;
+}
+
+/* A dot for each slide. Each is a 24px target around a 10px dot. */
+.moby-carousel-dots,
+.moby-carousel-counter {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  margin-top: 6px;
+}
+.moby-carousel .moby-carousel-dot,
+.moby-carousel .moby-carousel-dot:hover,
+.moby-carousel .moby-carousel-dot:focus {
+  position: relative;
+  width: 24px;
+  height: 24px;
+  margin: 0 2px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: none;
+  cursor: pointer;
+}
+.moby-carousel-dot::after {
+  content: "";
+  position: absolute;
+  top: 7px;
+  left: 7px;
+  box-sizing: border-box;
+  width: 10px;
+  height: 10px;
+  border: 2px solid var(--moby-carousel-control);
+  border-radius: 50%;
+}
+.moby-carousel-dot[aria-current="true"]::after {
+  background: var(--moby-carousel-control);
+}
+.moby-carousel-counter {
+  font-size: 0.875rem;
+  color: var(--moby-carousel-control);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .moby-carousel-viewport {
+    scroll-behavior: auto;
+  }
+}
+
+/* Windows high contrast mode: keep the dots and buttons visible. */
+@media (forced-colors: active) {
+  .moby-carousel-button {
+    border-color: ButtonText;
+  }
+  .moby-carousel-dot::after {
+    border-color: ButtonText;
+  }
+  .moby-carousel-dot[aria-current="true"]::after {
+    background: ButtonText;
+  }
+}

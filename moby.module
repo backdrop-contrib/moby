@@ -1,0 +1,1320 @@
+<?php
+/**
+ * @file
+ * Moby: a REST API for posting content from mobile devices.
+ *
+ * The API itself is standardized (see API.md in moby_docs), while the way posts are saved
+ * into Backdrop (node type, fields, and file types) is configurable at
+ * admin/config/services/moby.
+ */
+
+/**
+ * The newest version of the REST API this module implements.
+ *
+ * Every change to the API, additive or breaking, adds one to this and a row
+ * to the changelog in moby_docs/API.md. The Backdrop, Drupal and WordPress versions of
+ * Moby share the numbering: a module claims version N only once it implements
+ * every change up to N.
+ */
+define('MOBY_API_VERSION', 1);
+
+/**
+ * The oldest version of the REST API this module still answers. Older
+ * requests are refused with 426 api_version_unsupported.
+ */
+define('MOBY_API_MIN_VERSION', 1);
+
+/**
+ * The base path of all REST API endpoints. Clients send the API version they
+ * were built for in the "api" query parameter, such as ?api=1.
+ */
+define('MOBY_API_PATH', 'api/moby');
+
+/**
+ * The maximum length of a media item's alt text, in characters.
+ */
+define('MOBY_MAX_ALT_LENGTH', 2000);
+
+/**
+ * The maximum number of photos and videos in a post.
+ *
+ * The media field's number of values may lower this further.
+ */
+define('MOBY_MAX_MEDIA_PER_POST', 10);
+
+/**
+ * The maximum number of posts per page in GET /posts.
+ */
+define('MOBY_MAX_POSTS_PER_PAGE', 50);
+
+/**
+ * The highest page number accepted by GET /posts.
+ */
+define('MOBY_MAX_POSTS_PAGE', 100000);
+
+/**
+ * The maximum number of tags on a post.
+ */
+define('MOBY_MAX_TAGS_PER_POST', 50);
+
+/**
+ * The maximum length of a tag, in characters, which is the most a term name
+ * may hold.
+ */
+define('MOBY_MAX_TAG_LENGTH', 255);
+
+/**
+ * The most tags returned by GET /tags.
+ */
+define('MOBY_MAX_TAG_SUGGESTIONS', 20);
+
+/**
+ * Implements hook_permission().
+ */
+function moby_permission() {
+  return array(
+    'administer moby' => array(
+      'title' => t('Administer Moby'),
+      'description' => t('Configure how posts created through the API are saved.'),
+      'restrict access' => TRUE,
+    ),
+    'post via moby' => array(
+      'title' => t('Post via Moby'),
+      'description' => t('Create, edit, and delete own posts using the Moby API.'),
+    ),
+  );
+}
+
+/**
+ * Implements hook_config_info().
+ */
+function moby_config_info() {
+  $prefixes['moby.settings'] = array(
+    'label' => t('Moby settings'),
+    'group' => t('Configuration'),
+  );
+  return $prefixes;
+}
+
+/**
+ * Implements hook_menu().
+ */
+function moby_menu() {
+  $items['admin/config/services/moby'] = array(
+    'title' => 'Moby',
+    'description' => 'Configure how posts from the Moby app are saved.',
+    'page callback' => 'backdrop_get_form',
+    'page arguments' => array('moby_settings_form'),
+    'access arguments' => array('administer moby'),
+    'file' => 'moby.admin.inc',
+  );
+  $items['admin/config/services/moby/setup'] = array(
+    'title' => 'Run setup wizard',
+    'description' => 'Walks through setting up Moby.',
+    'page callback' => 'moby_setup_wizard_page',
+    'access arguments' => array('administer moby'),
+    'type' => MENU_LOCAL_ACTION,
+    'file' => 'moby.admin.inc',
+  );
+
+  // Each REST API path is a single router item. The page callback dispatches
+  // on the HTTP method, and all responses are delivered as JSON.
+  $api_defaults = array(
+    'type' => MENU_CALLBACK,
+    'delivery callback' => 'moby_deliver_json',
+    'access callback' => 'moby_api_access',
+    'access arguments' => array('authenticated'),
+    'file' => 'moby.api.inc',
+  );
+
+  $items[MOBY_API_PATH] = array(
+    'page callback' => 'moby_api_index',
+    'access arguments' => array('public'),
+  ) + $api_defaults;
+  $items[MOBY_API_PATH . '/meta'] = array(
+    'page callback' => 'moby_api_meta',
+    'access arguments' => array('public'),
+  ) + $api_defaults;
+  $items[MOBY_API_PATH . '/auth/token'] = array(
+    'page callback' => 'moby_api_auth_token',
+    'access arguments' => array('public'),
+  ) + $api_defaults;
+  $items[MOBY_API_PATH . '/me'] = array(
+    'page callback' => 'moby_api_me',
+  ) + $api_defaults;
+  $items[MOBY_API_PATH . '/media'] = array(
+    'page callback' => 'moby_api_media',
+  ) + $api_defaults;
+  $items[MOBY_API_PATH . '/media/%'] = array(
+    'page callback' => 'moby_api_media',
+    'page arguments' => array(3),
+  ) + $api_defaults;
+  $items[MOBY_API_PATH . '/tags'] = array(
+    'page callback' => 'moby_api_tags',
+  ) + $api_defaults;
+  $items[MOBY_API_PATH . '/posts'] = array(
+    'page callback' => 'moby_api_posts',
+  ) + $api_defaults;
+  $items[MOBY_API_PATH . '/posts/%'] = array(
+    'page callback' => 'moby_api_posts',
+    'page arguments' => array(3),
+  ) + $api_defaults;
+
+  return $items;
+}
+
+/**
+ * Implements hook_autoload_info().
+ */
+function moby_autoload_info() {
+  return array(
+    'MobyAuthMechanism' => 'includes/moby_auth.class.inc',
+    'MobyAuthException' => 'includes/moby_auth.class.inc',
+    'MobyAuthPassword' => 'includes/moby_auth_password.class.inc',
+  );
+}
+
+/**
+ * Implements hook_moby_auth_info().
+ */
+function moby_moby_auth_info() {
+  $mechanisms['password'] = array(
+    'label' => t('Username and password'),
+    'description' => t('Log in with a Backdrop username (or email address) and password, using the same rules as the user login form.'),
+    'class' => 'MobyAuthPassword',
+  );
+  return $mechanisms;
+}
+
+/**
+ * Returns all authentication mechanisms declared by hook_moby_auth_info().
+ *
+ * @return array
+ *   Mechanism definitions, keyed by machine name.
+ */
+function moby_get_auth_mechanisms() {
+  $mechanisms = &backdrop_static(__FUNCTION__);
+  if (!isset($mechanisms)) {
+    $mechanisms = module_invoke_all('moby_auth_info');
+    backdrop_alter('moby_auth_info', $mechanisms);
+  }
+  return $mechanisms;
+}
+
+/**
+ * Returns an instance of an authentication mechanism.
+ *
+ * @param string|null $name
+ *   (optional) The machine name of the mechanism. Defaults to the mechanism
+ *   configured at admin/config/services/moby.
+ *
+ * @return MobyAuthMechanism|false
+ *   The mechanism, or FALSE if it does not exist or its class is invalid.
+ */
+function moby_get_auth_mechanism($name = NULL) {
+  if (!isset($name)) {
+    $name = config_get('moby.settings', 'auth_mechanism');
+  }
+  $mechanisms = moby_get_auth_mechanisms();
+  if (empty($mechanisms[$name]['class']) || !is_subclass_of($mechanisms[$name]['class'], 'MobyAuthMechanism')) {
+    return FALSE;
+  }
+  return new $mechanisms[$name]['class']($name, $mechanisms[$name]);
+}
+
+/**
+ * Implements hook_init().
+ *
+ * Authenticates API requests that provide a bearer token.
+ */
+function moby_init() {
+  if ($_GET['q'] === MOBY_API_PATH || strpos($_GET['q'], MOBY_API_PATH . '/') === 0) {
+    moby_authenticate();
+  }
+  elseif (moby_request_is_post_page()) {
+    // Apps show the post's real page, rendered for the user viewing it, so
+    // drafts can be shown and access is the same as anywhere else. The token
+    // only applies to this request, which is never stored in the page cache.
+    moby_authenticate();
+    backdrop_page_is_cacheable(FALSE);
+    backdrop_add_http_header('Cache-Control', 'no-store');
+    // Apps have their own options for the post, and the site's administration
+    // links would open outside the app, where the user may not be logged in.
+    // See also moby_menu_local_tasks_alter() and
+    // moby_contextual_links_view_alter().
+    if (module_exists('admin_bar')) {
+      admin_bar_suppress();
+    }
+    moby_is_app_page(TRUE);
+  }
+}
+
+/**
+ * Gets or sets whether the current request is an app viewing a post's page.
+ *
+ * @param bool|null $is_app_page
+ *   (optional) The value to set.
+ *
+ * @return bool
+ *   TRUE if the page is being rendered for an app.
+ */
+function moby_is_app_page($is_app_page = NULL) {
+  $value = &backdrop_static(__FUNCTION__, FALSE);
+  if (isset($is_app_page)) {
+    $value = $is_app_page;
+  }
+  return $value;
+}
+
+/**
+ * Implements hook_contextual_links_view_alter().
+ *
+ * Removes contextual links from pages shown in apps.
+ */
+function moby_contextual_links_view_alter(&$element, $items) {
+  if (moby_is_app_page()) {
+    $element['#links'] = array();
+  }
+}
+
+/**
+ * Implements hook_menu_local_tasks_alter().
+ *
+ * Removes the tabs, such as "View" and "Edit", from pages shown in apps.
+ */
+function moby_menu_local_tasks_alter(&$data, $router_item, $root_path) {
+  if (moby_is_app_page()) {
+    $data['tabs'] = array();
+    $data['actions'] = array();
+  }
+}
+
+/**
+ * Determines whether this is an app's request for a post's page.
+ *
+ * Bearer tokens are otherwise limited to the API. They also apply to viewing
+ * the page of a node of the configured content type. A token can't be sent by
+ * a link or form on another site, so this does not allow cross-site requests.
+ *
+ * @return bool
+ *   TRUE for a GET or HEAD request with a bearer token for a post's page.
+ */
+function moby_request_is_post_page() {
+  if (!in_array($_SERVER['REQUEST_METHOD'], array('GET', 'HEAD')) || !preg_match('@^node/(\d+)$@', $_GET['q'], $matches) || moby_request_bearer_token() === NULL) {
+    return FALSE;
+  }
+  $type = db_query('SELECT type FROM {node} WHERE nid = :nid', array(':nid' => $matches[1]))->fetchField();
+  return $type && $type === config_get('moby.settings', 'node_type');
+}
+
+/**
+ * Authenticates the current API request.
+ *
+ * Requests with an "Authorization: Bearer" header are authenticated as the
+ * token's owner, or as anonymous if the token is invalid. Session cookies are
+ * only honored for GET and HEAD requests (which is convenient for testing in
+ * a browser), to prevent cross-site request forgery.
+ *
+ * The API never saves the session, so it never issues a session cookie, and
+ * switching the user here does not affect a browser session.
+ */
+function moby_authenticate() {
+  global $user;
+
+  backdrop_save_session(FALSE);
+  $original_uid = $user->uid;
+
+  $token = moby_request_bearer_token();
+  if (isset($token)) {
+    $user = backdrop_anonymous_user();
+    $record = moby_token_load($token);
+    if ($record && ($account = user_load($record->uid)) && $account->status) {
+      $user = $account;
+      moby_current_token($record);
+      // Limit writes to once per minute for frequently used tokens.
+      if (REQUEST_TIME - $record->last_used > 60) {
+        db_update('moby_token')
+          ->fields(array('last_used' => REQUEST_TIME))
+          ->condition('tid', $record->tid)
+          ->execute();
+      }
+    }
+  }
+  elseif (user_is_logged_in() && !in_array($_SERVER['REQUEST_METHOD'], array('GET', 'HEAD'))) {
+    $user = backdrop_anonymous_user();
+  }
+
+  // The router item, including its access check, is cached for the original
+  // user when the theme is initialized just before hook_init(). Rebuild it so
+  // access is checked for the user the request is now authenticated as.
+  if ($user->uid != $original_uid) {
+    backdrop_static_reset('menu_get_item');
+  }
+}
+
+/**
+ * Returns the bearer token from the current request's Authorization header.
+ *
+ * @return string|null
+ *   The token, or NULL if no bearer token was provided.
+ */
+function moby_request_bearer_token() {
+  // Some Apache and CGI configurations only provide the header after a
+  // rewrite, under a "REDIRECT_" prefix.
+  foreach (array('HTTP_AUTHORIZATION', 'REDIRECT_HTTP_AUTHORIZATION') as $key) {
+    if (!empty($_SERVER[$key]) && preg_match('/^Bearer\s+(\S+)$/i', $_SERVER[$key], $matches)) {
+      return $matches[1];
+    }
+  }
+  return NULL;
+}
+
+/**
+ * Gets or sets the token used to authenticate the current request.
+ *
+ * @param object|null $record
+ *   (optional) The token record to set as current.
+ *
+ * @return object|null
+ *   The token record from {moby_token}, or NULL if the request was not
+ *   authenticated with a token.
+ */
+function moby_current_token($record = NULL) {
+  $current = &backdrop_static(__FUNCTION__);
+  if (isset($record)) {
+    $current = $record;
+  }
+  return $current;
+}
+
+/**
+ * Creates an API token for a user.
+ *
+ * @param User $account
+ *   The user account the token authenticates as.
+ * @param string $device_name
+ *   The name of the device the token is issued to.
+ * @param string $mechanism
+ *   The machine name of the authentication mechanism that was used.
+ *
+ * @return string
+ *   The new token. Only a hash of it is stored, so it cannot be retrieved
+ *   again later.
+ */
+function moby_token_create($account, $device_name, $mechanism) {
+  $token = 'moby_' . backdrop_random_key(32);
+  db_insert('moby_token')
+    ->fields(array(
+      'uid' => $account->uid,
+      'token_hash' => moby_token_hash($token),
+      'device_name' => truncate_utf8($device_name, 255),
+      'mechanism' => $mechanism,
+      'created' => REQUEST_TIME,
+      'last_used' => REQUEST_TIME,
+    ))
+    ->execute();
+  return $token;
+}
+
+/**
+ * Loads the record for an API token.
+ *
+ * @param string $token
+ *   The token, as provided by the app.
+ *
+ * @return object|false
+ *   The token record from {moby_token}, or FALSE if the token does not exist.
+ */
+function moby_token_load($token) {
+  return db_query('SELECT * FROM {moby_token} WHERE token_hash = :hash', array(':hash' => moby_token_hash($token)))->fetchObject();
+}
+
+/**
+ * Deletes an API token.
+ *
+ * @param int $tid
+ *   The token ID.
+ */
+function moby_token_delete($tid) {
+  db_delete('moby_token')
+    ->condition('tid', $tid)
+    ->execute();
+}
+
+/**
+ * Returns the hash under which a token is stored.
+ *
+ * Tokens are long random strings, so a fast unsalted hash is sufficient and
+ * allows tokens to be looked up directly.
+ */
+function moby_token_hash($token) {
+  return hash('sha256', $token);
+}
+
+/**
+ * Implements hook_node_delete().
+ */
+function moby_node_delete($node) {
+  db_delete('moby_post')
+    ->condition('nid', $node->nid)
+    ->execute();
+}
+
+/**
+ * Returns the vocabulary that tags are added to.
+ *
+ * @return string|false
+ *   The vocabulary's machine name, or FALSE if tags aren't saved because none
+ *   is selected, or it or the Taxonomy module is missing.
+ */
+function moby_tags_vocabulary() {
+  $vocabulary = config_get('moby.settings', 'mapping.tags.vocabulary');
+  if (!$vocabulary || !module_exists('taxonomy') || !taxonomy_vocabulary_load($vocabulary)) {
+    return FALSE;
+  }
+  return $vocabulary;
+}
+
+/**
+ * Returns the content type's field that holds tags from a vocabulary.
+ *
+ * @param string|null $node_type
+ *   (optional) The content type. Defaults to the configured one.
+ * @param string|null $vocabulary
+ *   (optional) The vocabulary. Defaults to the configured one.
+ *
+ * @return string|false
+ *   The name of a term reference field on the content type that allows only
+ *   terms from the vocabulary, or FALSE if there is none.
+ */
+function moby_tags_field($node_type = NULL, $vocabulary = NULL) {
+  $node_type = isset($node_type) ? $node_type : config_get('moby.settings', 'node_type');
+  $vocabulary = isset($vocabulary) ? $vocabulary : moby_tags_vocabulary();
+  if (!$node_type || !$vocabulary || !module_exists('taxonomy')) {
+    return FALSE;
+  }
+  foreach (field_info_instances('node', $node_type) as $field_name => $instance) {
+    if (moby_tags_field_is_for(field_info_field($field_name), $vocabulary)) {
+      return $field_name;
+    }
+  }
+  return FALSE;
+}
+
+/**
+ * Checks whether a field holds any number of tags from just one vocabulary.
+ */
+function moby_tags_field_is_for($field, $vocabulary) {
+  if (!$field || $field['type'] !== 'taxonomy_term_reference' || $field['cardinality'] != FIELD_CARDINALITY_UNLIMITED) {
+    return FALSE;
+  }
+  $allowed = isset($field['settings']['allowed_values']) ? $field['settings']['allowed_values'] : array();
+  return count($allowed) === 1 && $allowed[0]['vocabulary'] === $vocabulary;
+}
+
+/**
+ * Adds a tags field to a content type, unless it already has one.
+ *
+ * A tags field that other content types already use for the vocabulary, such
+ * as the "field_tags" of articles, is shared. Otherwise "field_mobile_tags"
+ * is created.
+ *
+ * @param string $node_type
+ *   The content type.
+ * @param string $vocabulary
+ *   The vocabulary's machine name.
+ *
+ * @return string|false
+ *   The name of the field, or FALSE if the Taxonomy module is not enabled.
+ */
+function moby_tags_ensure_field($node_type, $vocabulary) {
+  if (!module_exists('taxonomy')) {
+    return FALSE;
+  }
+  if ($field_name = moby_tags_field($node_type, $vocabulary)) {
+    return $field_name;
+  }
+  $field_name = FALSE;
+  foreach (field_info_fields() as $field) {
+    if (moby_tags_field_is_for($field, $vocabulary)) {
+      $field_name = $field['field_name'];
+      break;
+    }
+  }
+  if (!$field_name) {
+    // Avoid a name that is taken by a field of another kind.
+    $field_name = 'field_mobile_tags';
+    for ($i = 2; field_info_field($field_name); $i++) {
+      $field_name = 'field_mobile_tags_' . $i;
+    }
+    field_create_field(array(
+      'field_name' => $field_name,
+      'type' => 'taxonomy_term_reference',
+      'cardinality' => FIELD_CARDINALITY_UNLIMITED,
+      'settings' => array(
+        'allowed_values' => array(array('vocabulary' => $vocabulary, 'parent' => 0)),
+      ),
+    ));
+  }
+  field_create_instance(array(
+    'field_name' => $field_name,
+    'entity_type' => 'node',
+    'bundle' => $node_type,
+    'label' => t('Tags'),
+    'widget' => array('type' => 'taxonomy_autocomplete'),
+    'display' => array(
+      'default' => array('label' => 'above', 'type' => 'taxonomy_term_reference_link'),
+    ),
+  ));
+  return $field_name;
+}
+
+/**
+ * Finds the hashtags in a text, such as "backdrop" for "#backdrop".
+ *
+ * A hashtag starts with a letter, follows a space, a line break, or an opening
+ * bracket (so the "#" in a link or an HTML entity isn't one), and continues
+ * with letters, numbers, underscores, and hyphens.
+ *
+ * @param string $text
+ *   The text, which may be HTML.
+ *
+ * @return string[]
+ *   The tags, without their "#", in the order they appear.
+ */
+function moby_hashtags($text) {
+  $text = decode_entities(strip_tags(str_replace('<', ' <', $text)));
+  preg_match_all('/(?:^|(?<=[\s(\[]))#(\p{L}[\p{L}\p{M}\p{N}_-]*)/u', $text, $matches);
+  $tags = array();
+  foreach ($matches[1] as $tag) {
+    // A trailing hyphen is more likely punctuation than part of the tag.
+    $tags[] = rtrim($tag, '-');
+  }
+  return moby_tags_clean($tags);
+}
+
+/**
+ * Tidies a list of tags: trims them, removes a leading "#", and removes empty
+ * tags and duplicates, which differ only in letter case.
+ *
+ * @param string[] $tags
+ *   The tags.
+ *
+ * @return string[]
+ *   The tidied tags, in their original order.
+ */
+function moby_tags_clean(array $tags) {
+  $clean = array();
+  foreach ($tags as $tag) {
+    $tag = trim(preg_replace('/\s+/u', ' ', ltrim(trim($tag), '#')));
+    $key = backdrop_strtolower($tag);
+    if ($tag !== '' && !isset($clean[$key])) {
+      $clean[$key] = $tag;
+    }
+  }
+  return array_values($clean);
+}
+
+/**
+ * Returns the IDs of the terms for tags, adding terms that don't exist yet.
+ *
+ * Existing terms are matched regardless of letter case, so "Backdrop" and
+ * "backdrop" are the same tag.
+ *
+ * @param string[] $tags
+ *   The tag names.
+ * @param string $vocabulary
+ *   The vocabulary's machine name.
+ *
+ * @return int[]
+ *   The term IDs, in the order of the tags.
+ */
+function moby_tags_term_ids(array $tags, $vocabulary) {
+  $tids = array();
+  foreach (moby_tags_clean($tags) as $tag) {
+    $tid = db_query('SELECT tid FROM {taxonomy_term_data} WHERE vocabulary = :vocabulary AND LOWER(name) = LOWER(:name) ORDER BY tid', array(
+      ':vocabulary' => $vocabulary,
+      ':name' => $tag,
+    ))->fetchField();
+    if (!$tid) {
+      $term = entity_create('taxonomy_term', array('name' => $tag, 'vocabulary' => $vocabulary));
+      taxonomy_term_save($term);
+      $tid = $term->tid;
+    }
+    $tids[$tid] = (int) $tid;
+  }
+  return array_values($tids);
+}
+
+/**
+ * Implements hook_theme().
+ */
+function moby_theme() {
+  $base = array('file' => 'moby.theme.inc');
+  return array(
+    'moby_post' => array(
+      'variables' => array(
+        'node' => NULL,
+        'view_mode' => 'full',
+        'description' => NULL,
+        'media' => NULL,
+        'location' => NULL,
+        'coordinates' => NULL,
+        'order' => array('date', 'media', 'description', 'location'),
+      ),
+      'template' => 'templates/moby-post',
+    ) + $base,
+    'moby_carousel' => array(
+      'variables' => array(
+        'items' => array(),
+        'label' => NULL,
+      ),
+      'template' => 'templates/moby-carousel',
+    ) + $base,
+  );
+}
+
+/**
+ * Implements hook_node_view().
+ *
+ * Gathers the fields of posts into one element that is printed with
+ * moby-post.tpl.php, so the theme's node template still prints the title,
+ * date, and links around it.
+ */
+function moby_node_view($node, $view_mode, $langcode) {
+  $config = config('moby.settings');
+  if (!$config->get('node_type') || $node->type !== $config->get('node_type')) {
+    return;
+  }
+  $mapping = $config->get('mapping');
+  $parts = array(
+    'description' => isset($mapping['description']['field']) ? $mapping['description']['field'] : '',
+    'media' => isset($mapping['media']['field']) ? $mapping['media']['field'] : '',
+    'location' => isset($mapping['location']['name_field']) ? $mapping['location']['name_field'] : '',
+    'coordinates' => isset($mapping['location']['coordinates_field']) ? $mapping['location']['coordinates_field'] : '',
+  );
+  $element = array(
+    '#theme' => 'moby_post',
+    '#node' => $node,
+    '#view_mode' => $view_mode,
+    '#order' => moby_post_order($view_mode),
+    '#attached' => array(
+      'css' => array(backdrop_get_path('module', 'moby') . '/css/moby.post.css'),
+    ),
+  );
+  $weights = array();
+  foreach ($parts as $key => $field_name) {
+    if ($field_name && isset($node->content[$field_name])) {
+      $element['#' . $key] = $node->content[$field_name];
+      $weights[] = isset($node->content[$field_name]['#weight']) ? $node->content[$field_name]['#weight'] : 0;
+      unset($node->content[$field_name]);
+    }
+  }
+  if ($weights) {
+    $element['#weight'] = min($weights);
+    $node->content['moby_post'] = $element;
+  }
+}
+
+/**
+ * Returns the order a post's parts are shown in, from the content type's
+ * display settings.
+ *
+ * Posts on the site show their parts in this order, and apps show them in the
+ * same order (discovery's display.order), so both look alike. The parts are
+ * ordered by their fields' weights in the view mode. The date comes first when
+ * it is the node's authored on date, which themes show above the content. The
+ * location's place is the lighter of its name and coordinates fields. Parts
+ * without a field come last, in the default order.
+ *
+ * @param string $view_mode
+ *   The view mode, such as "default". View modes without their own settings
+ *   use the default display's.
+ *
+ * @return string[]
+ *   "date", "media", "description" and "location", in display order.
+ */
+function moby_post_order($view_mode = 'default') {
+  $config = config('moby.settings');
+  $node_type = $config->get('node_type');
+  $mapping = $config->get('mapping');
+  $fields = array(
+    'date' => array(isset($mapping['date']['field']) ? $mapping['date']['field'] : 'created'),
+    'media' => array(isset($mapping['media']['field']) ? $mapping['media']['field'] : ''),
+    'description' => array(isset($mapping['description']['field']) ? $mapping['description']['field'] : ''),
+    'location' => array(
+      isset($mapping['location']['name_field']) ? $mapping['location']['name_field'] : '',
+      isset($mapping['location']['coordinates_field']) ? $mapping['location']['coordinates_field'] : '',
+    ),
+  );
+  $order = array();
+  $position = 0;
+  foreach ($fields as $part => $field_names) {
+    // Ties, and parts without a field, keep the default order.
+    $weight = 1000 + $position++;
+    foreach (array_filter($field_names) as $field_name) {
+      if ($field_name === 'created') {
+        $weight = -1000;
+        continue;
+      }
+      $instance = $node_type ? field_info_instance('node', $field_name, $node_type) : NULL;
+      if (!$instance) {
+        continue;
+      }
+      $display = isset($instance['display'][$view_mode]) ? $instance['display'][$view_mode] : (isset($instance['display']['default']) ? $instance['display']['default'] : array());
+      if (isset($display['weight'])) {
+        $weight = min($weight, (float) $display['weight'] + $position / 100);
+      }
+    }
+    $order[$part] = $weight;
+  }
+  asort($order);
+  return array_keys($order);
+}
+
+/**
+ * Implements hook_field_formatter_info().
+ */
+function moby_field_formatter_info() {
+  return array(
+    'moby_carousel' => array(
+      'label' => t('Moby Carousel'),
+      'description' => t('Shows photos and videos one at a time, with buttons and swiping to move between them.'),
+      'field types' => array('file', 'image'),
+      'settings' => array(
+        'image_style' => 'large',
+      ),
+    ),
+  );
+}
+
+/**
+ * Implements hook_field_formatter_settings_form().
+ */
+function moby_field_formatter_settings_form($field, $instance, $view_mode, $form, &$form_state) {
+  $settings = $instance['display'][$view_mode]['settings'];
+  $element['image_style'] = array(
+    '#type' => 'select',
+    '#title' => t('Image style for photos'),
+    '#options' => image_style_options(FALSE),
+    '#empty_option' => t('None (original image)'),
+    '#default_value' => $settings['image_style'],
+    '#description' => t('Videos are always shown at their original size, scaled to fit.'),
+  );
+  return $element;
+}
+
+/**
+ * Implements hook_field_formatter_settings_summary().
+ */
+function moby_field_formatter_settings_summary($field, $instance, $view_mode) {
+  $settings = $instance['display'][$view_mode]['settings'];
+  $styles = image_style_options(FALSE);
+  if ($settings['image_style'] && isset($styles[$settings['image_style']])) {
+    return t('Image style for photos: @style', array('@style' => $styles[$settings['image_style']]));
+  }
+  return t('Image style for photos: Original image');
+}
+
+/**
+ * Implements hook_field_formatter_view().
+ */
+function moby_field_formatter_view($entity_type, $entity, $field, $instance, $langcode, $items, $display) {
+  if ($display['type'] !== 'moby_carousel' || !$items) {
+    return array();
+  }
+  module_load_include('inc', 'moby', 'moby.theme');
+  $carousel_items = moby_carousel_items($items, $display['settings']);
+  if (!$carousel_items) {
+    return array();
+  }
+  $path = backdrop_get_path('module', 'moby');
+  $element = array(
+    '#theme' => 'moby_carousel',
+    '#items' => $carousel_items,
+    '#label' => t('Photos and videos'),
+    '#attached' => array(
+      'css' => array($path . '/css/moby.carousel.css'),
+    ),
+  );
+  if (count($carousel_items) > 1) {
+    $element['#attached']['js'][] = $path . '/js/moby.carousel.js';
+  }
+  return array($element);
+}
+
+/**
+ * Implements hook_user_delete().
+ */
+function moby_user_delete($account) {
+  db_delete('moby_token')
+    ->condition('uid', $account->uid)
+    ->execute();
+}
+
+/**
+ * Returns the configured media field and its instance.
+ *
+ * @return array|false
+ *   An array containing the "field" and "instance" definitions of the file
+ *   field that photos and videos are saved into, or FALSE if no valid media
+ *   field is configured.
+ */
+function moby_media_field() {
+  $config = config('moby.settings');
+  $node_type = $config->get('node_type');
+  $field_name = $config->get('mapping.media.field');
+  if (!$node_type || !$field_name) {
+    return FALSE;
+  }
+  $field = field_info_field($field_name);
+  $instance = field_info_instance('node', $field_name, $node_type);
+  if (!$field || !$instance || $field['type'] !== 'file') {
+    return FALSE;
+  }
+  return array('field' => $field, 'instance' => $instance);
+}
+
+/**
+ * Returns the configured video thumbnail field and its instance.
+ *
+ * Thumbnails are stored on the video's file entity, in an image field
+ * attached to the video file type, so each video has its own thumbnail.
+ *
+ * @param string|null $file_type
+ *   (optional) The file type of the video. Defaults to the type videos
+ *   uploaded through the API are given.
+ *
+ * @return array|false
+ *   An array containing the "field" and "instance" definitions of the image
+ *   field, or FALSE if no thumbnail field is configured, or it is not
+ *   attached to the file type.
+ */
+function moby_video_thumbnail_field($file_type = NULL) {
+  $field_name = config_get('moby.settings', 'mapping.media.thumbnail_field');
+  if (!$field_name) {
+    return FALSE;
+  }
+  if (!isset($file_type)) {
+    $file_type = moby_video_file_type();
+  }
+  $field = field_info_field($field_name);
+  $instance = $file_type ? field_info_instance('file', $field_name, $file_type) : FALSE;
+  if (!$field || !$instance || $field['type'] !== 'image') {
+    return FALSE;
+  }
+  return array('field' => $field, 'instance' => $instance);
+}
+
+/**
+ * Returns the file type that videos uploaded through the API are given.
+ *
+ * @param string|null $file_type
+ *   (optional) The video file type setting to use instead of the saved one,
+ *   where an empty string means the type is determined from the MIME type.
+ *
+ * @return string|false
+ *   The configured video file type, or if none is configured, the file type
+ *   Backdrop assigns to MP4 videos. FALSE if there is none.
+ */
+function moby_video_file_type($file_type = NULL) {
+  if (!isset($file_type)) {
+    $file_type = config_get('moby.settings', 'mapping.media.file_types.video');
+  }
+  if (!$file_type) {
+    $probe = entity_create('file', array('filemime' => 'video/mp4'));
+    $file_type = file_get_type($probe);
+  }
+  return $file_type ? $file_type : FALSE;
+}
+
+/**
+ * Returns the API media type for a MIME type.
+ *
+ * @param string $mime_type
+ *   A MIME type, such as "image/jpeg".
+ *
+ * @return string|null
+ *   Either "image" or "video", or NULL if the MIME type is neither.
+ */
+function moby_media_type($mime_type) {
+  list($type) = explode('/', $mime_type);
+  return in_array($type, array('image', 'video')) ? $type : NULL;
+}
+
+/**
+ * Returns the photo and video extensions allowed by the media field.
+ *
+ * @return array
+ *   An array with "image" and "video" keys, each a list of extensions.
+ */
+function moby_media_extensions() {
+  $extensions = array('image' => array(), 'video' => array());
+  if ($media_field = moby_media_field()) {
+    $allowed = preg_split('/\s+/', trim($media_field['instance']['settings']['file_extensions']), -1, PREG_SPLIT_NO_EMPTY);
+    foreach ($allowed as $extension) {
+      if ($type = moby_media_type(file_get_mimetype('file.' . $extension))) {
+        $extensions[$type][] = strtolower($extension);
+      }
+    }
+  }
+  return $extensions;
+}
+
+/**
+ * Returns the maximum number of photos and videos in a post.
+ */
+function moby_max_media_per_post() {
+  $media_field = moby_media_field();
+  if (!$media_field) {
+    return 0;
+  }
+  $cardinality = (int) $media_field['field']['cardinality'];
+  return ($cardinality == FIELD_CARDINALITY_UNLIMITED) ? MOBY_MAX_MEDIA_PER_POST : min($cardinality, MOBY_MAX_MEDIA_PER_POST);
+}
+
+/**
+ * Returns how descriptions are stored.
+ *
+ * Descriptions are sent and stored in the text format of the description
+ * field, exactly as the node form saves them. For formats that accept HTML,
+ * the app must send HTML, escaping special characters such as "<" and "&".
+ *
+ * @return array
+ *   An array containing:
+ *   - format: The machine name of the text format, or NULL if the field does
+ *     not use text formats.
+ *   - html: Whether descriptions are HTML. This is FALSE for fields without
+ *     text formats, and for formats that escape all HTML.
+ */
+function moby_description_format() {
+  $info = array('format' => NULL, 'html' => FALSE);
+  $field_name = config_get('moby.settings', 'mapping.description.field');
+  $instance = $field_name ? field_info_instance('node', $field_name, config_get('moby.settings', 'node_type')) : FALSE;
+  if ($instance && !empty($instance['settings']['text_processing'])) {
+    $info['format'] = config_get('moby.settings', 'mapping.description.format');
+    $format = filter_format_load($info['format']);
+    $info['html'] = $format && empty($format->filters['filter_html_escape']->status);
+  }
+  return $info;
+}
+
+/**
+ * Determines whether a user may create posts.
+ *
+ * @param User $account
+ *   The user account.
+ */
+function moby_user_can_create($account) {
+  $node_type = node_type_get_type(config_get('moby.settings', 'node_type'));
+  return $node_type && user_access('post via moby', $account) && node_access('create', $node_type->type, $account);
+}
+
+/**
+ * Determines whether a user's posts may be published.
+ *
+ * As on the node form, users with the "Administer content" permission may
+ * choose. Other users' posts get the content type's default status.
+ *
+ * @param User $account
+ *   The user account.
+ */
+function moby_user_can_publish($account) {
+  if (user_access('administer nodes', $account)) {
+    return TRUE;
+  }
+  $node_type = node_type_get_type(config_get('moby.settings', 'node_type'));
+  return $node_type && !empty($node_type->settings['status_default']);
+}
+
+/**
+ * Returns the maximum size in bytes of any uploaded file.
+ *
+ * This is PHP's maximum upload size, or the media field's maximum upload
+ * size if it is smaller.
+ */
+function moby_max_upload_size() {
+  $max_size = file_upload_max_size();
+  $media_field = moby_media_field();
+  if ($media_field && !empty($media_field['instance']['settings']['max_filesize'])) {
+    $max_size = min($max_size, parse_size($media_field['instance']['settings']['max_filesize']));
+  }
+  return (int) $max_size;
+}
+
+/**
+ * Returns the maximum size in bytes of an uploaded image.
+ *
+ * This applies to photos and to video thumbnails, so it is the maximum upload
+ * size, or the thumbnail field's maximum upload size if one is configured and
+ * it is smaller.
+ *
+ * @see moby_max_upload_size()
+ */
+function moby_max_image_size() {
+  $max_size = moby_max_upload_size();
+  $thumbnail_field = moby_video_thumbnail_field();
+  if ($thumbnail_field && !empty($thumbnail_field['instance']['settings']['max_filesize'])) {
+    $max_size = min($max_size, parse_size($thumbnail_field['instance']['settings']['max_filesize']));
+  }
+  return (int) $max_size;
+}
+
+/**
+ * Returns the maximum size in bytes of an uploaded video.
+ *
+ * This is the configured maximum video size, never more than the maximum
+ * upload size, which is used when no maximum is configured.
+ *
+ * @see moby_max_upload_size()
+ */
+function moby_max_video_size() {
+  $max_size = moby_max_upload_size();
+  $setting = config_get('moby.settings', 'max_video_size');
+  if (!empty($setting)) {
+    $max_size = min($max_size, parse_size($setting));
+  }
+  return (int) $max_size;
+}
+
+/**
+ * Implements hook_file_presave().
+ *
+ * Assigns the configured file type to photos and videos uploaded through the
+ * API, before they are first saved.
+ */
+function moby_file_presave($file) {
+  if (empty($file->fid) && isset($file->source) && $file->source === 'moby_media') {
+    $media_type = moby_media_type($file->filemime);
+    $file_type = config_get('moby.settings', 'mapping.media.file_types.' . $media_type);
+    if ($media_type && $file_type) {
+      $file->type = $file_type;
+    }
+  }
+}
+
+/**
+ * Implements hook_file_delete().
+ */
+function moby_file_delete($file) {
+  db_delete('moby_media')
+    ->condition('fid', $file->fid)
+    ->execute();
+}
+
+/**
+ * Implements hook_file_mimetype_mapping_alter().
+ */
+function moby_file_mimetype_mapping_alter(&$mapping) {
+  // Add the HEIC and HEIF image formats used by iOS cameras.
+  $new_mappings = array(
+    'heic' => 'image/heic',
+    'heif' => 'image/heif',
+  );
+  foreach ($new_mappings as $extension => $mime_type) {
+    if (!isset($mapping['extensions'][$extension])) {
+      $index = array_search($mime_type, $mapping['mimetypes']);
+      if ($index === FALSE) {
+        $mapping['mimetypes'][] = $mime_type;
+        $index = max(array_keys($mapping['mimetypes']));
+      }
+      $mapping['extensions'][$extension] = $index;
+    }
+  }
+}
+
+/**
+ * Access callback for REST API endpoints.
+ *
+ * @param string $level
+ *   Either "public" for endpoints available without authentication, or
+ *   "authenticated" for endpoints that require the "post via moby" permission.
+ */
+function moby_api_access($level) {
+  // Requests for a version the site no longer serves are refused before they
+  // do anything; moby_deliver_json() answers them with a 426 error.
+  if (!moby_api_version_supported()) {
+    return FALSE;
+  }
+  if ($level === 'public') {
+    return TRUE;
+  }
+  return user_access('post via moby');
+}
+
+/**
+ * Returns the API version the client asked for, from the "api" query
+ * parameter.
+ *
+ * @return int
+ *   The requested version. Requests without one are treated as version 1.
+ */
+function moby_api_requested_version() {
+  $version = &backdrop_static(__FUNCTION__);
+  if (!isset($version)) {
+    $version = isset($_GET['api']) && ctype_digit((string) $_GET['api']) ? (int) $_GET['api'] : 1;
+  }
+  return $version;
+}
+
+/**
+ * Returns the API version this request is answered as.
+ *
+ * It is the version the client asked for, or this module's newest version
+ * when the client is newer. Handlers for breaking changes keep the old
+ * behaviour for requests below the version that changed it, such as
+ * if (moby_api_version() < 9) { ... }.
+ *
+ * @return int
+ *   The version.
+ */
+function moby_api_version() {
+  return min(moby_api_requested_version(), MOBY_API_VERSION);
+}
+
+/**
+ * Whether this module still serves the requested API version.
+ */
+function moby_api_version_supported() {
+  return moby_api_requested_version() >= MOBY_API_MIN_VERSION;
+}
+
+/**
+ * Builds a REST API response to be delivered by moby_deliver_json().
+ *
+ * @param array|null $body
+ *   The data to be encoded as the JSON response body, or NULL for no body.
+ * @param int $status
+ *   The HTTP status code.
+ * @param array $headers
+ *   Additional HTTP headers, keyed by header name.
+ *
+ * @return array
+ *   A response array.
+ */
+function moby_response($body, $status = 200, array $headers = array()) {
+  return array(
+    '#moby_response' => TRUE,
+    'status' => $status,
+    'headers' => $headers,
+    'body' => $body,
+  );
+}
+
+/**
+ * Builds a REST API error response.
+ *
+ * @param int $status
+ *   The HTTP status code.
+ * @param string $code
+ *   A machine-readable error code, such as "validation_failed".
+ * @param string $message
+ *   A human-readable error message.
+ * @param string $field
+ *   (optional) The request field that caused the error, such as "media[0]".
+ * @param array $headers
+ *   (optional) Additional HTTP headers, keyed by header name.
+ *
+ * @return array
+ *   A response array.
+ */
+function moby_error($status, $code, $message, $field = NULL, array $headers = array()) {
+  $error = array(
+    'code' => $code,
+    'message' => $message,
+  );
+  if (isset($field)) {
+    $error['field'] = $field;
+  }
+  return moby_response(array('error' => $error), $status, $headers);
+}
+
+/**
+ * Delivery callback for REST API endpoints.
+ *
+ * Similar to backdrop_json_deliver(), but supports arbitrary status codes and
+ * returns menu errors using the API's standard error format.
+ *
+ * @param array|int|null $page_callback_result
+ *   A response array from moby_response(), or a menu status constant.
+ */
+function moby_deliver_json($page_callback_result) {
+  // Responses vary by the authenticated user, so they must never be stored in
+  // the anonymous page cache.
+  backdrop_page_is_cacheable(FALSE);
+
+  if (!moby_api_version_supported()) {
+    // The app is older than the oldest version this site serves.
+    $response = moby_response(array(
+      'error' => array(
+        'code' => 'api_version_unsupported',
+        'message' => t('This site needs a newer version of the Moby app.'),
+        'api_min_version' => MOBY_API_MIN_VERSION,
+      ),
+    ), 426);
+  }
+  elseif (is_int($page_callback_result)) {
+    switch ($page_callback_result) {
+      case MENU_NOT_FOUND:
+        $response = moby_error(404, 'not_found', t('The requested resource could not be found.'));
+        break;
+      case MENU_ACCESS_DENIED:
+        if (user_is_anonymous()) {
+          $response = moby_error(401, 'unauthorized', t('Authentication is required.'), NULL, array('WWW-Authenticate' => 'Bearer'));
+        }
+        else {
+          $response = moby_error(403, 'forbidden', t('You do not have permission to access this resource.'));
+        }
+        break;
+      case MENU_SITE_OFFLINE:
+        $response = moby_error(503, 'site_offline', t('The site is currently under maintenance.'));
+        break;
+    }
+  }
+  elseif (is_array($page_callback_result) && !empty($page_callback_result['#moby_response'])) {
+    $response = $page_callback_result;
+  }
+  else {
+    $response = moby_error(500, 'server_error', t('The server returned an unexpected response.'));
+  }
+
+  backdrop_add_http_header('Status', $response['status'] . ' ' . moby_status_text($response['status']));
+  backdrop_add_http_header('Cache-Control', 'no-store');
+  // The version the request was answered as, so clients newer than the site
+  // can tell.
+  backdrop_add_http_header('Moby-API-Version', (string) moby_api_version());
+  foreach ($response['headers'] as $name => $value) {
+    backdrop_add_http_header($name, $value);
+  }
+  if (isset($response['body'])) {
+    backdrop_json_output($response['body']);
+  }
+
+  backdrop_page_footer();
+}
+
+/**
+ * Returns the reason phrase for an HTTP status code used by the API.
+ */
+function moby_status_text($status) {
+  $phrases = array(
+    200 => 'OK',
+    201 => 'Created',
+    204 => 'No Content',
+    400 => 'Bad Request',
+    401 => 'Unauthorized',
+    403 => 'Forbidden',
+    404 => 'Not Found',
+    405 => 'Method Not Allowed',
+    409 => 'Conflict',
+    413 => 'Payload Too Large',
+    415 => 'Unsupported Media Type',
+    426 => 'Upgrade Required',
+    422 => 'Unprocessable Entity',
+    429 => 'Too Many Requests',
+    500 => 'Internal Server Error',
+    501 => 'Not Implemented',
+    503 => 'Service Unavailable',
+  );
+  return isset($phrases[$status]) ? $phrases[$status] : '';
+}

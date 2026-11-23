@@ -1,0 +1,34 @@
+{
+    "_config_name": "moby.settings",
+    "setup_complete": false,
+    "node_type": "",
+    "auth_mechanism": "password",
+    "default_status": 1,
+    "title_length": 80,
+    "max_video_size": "",
+    "thumbnail_style": "large",
+    "mapping": {
+        "description": {
+            "field": "body",
+            "format": "filtered_html"
+        },
+        "date": {
+            "field": "created"
+        },
+        "location": {
+            "name_field": "",
+            "coordinates_field": ""
+        },
+        "media": {
+            "field": "",
+            "file_types": {
+                "image": "image",
+                "video": "video"
+            },
+            "thumbnail_field": ""
+        },
+        "tags": {
+            "vocabulary": "tags"
+        }
+    }
+}
