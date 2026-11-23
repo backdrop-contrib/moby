@@ -109,8 +109,8 @@ carousel only needed a small script for the buttons, dots, and ARIA.
 
 ### API
 
-The REST API is described in [`../moby_docs/API.md`](../moby_docs/API.md),
-with the rest of the Moby documentation.
+The REST API is described in [API.md](https://github.com/quicksketch/moby_docs/blob/main/API.md), with the rest of
+the [Moby documentation](https://github.com/quicksketch/moby_docs).
 
 ### Extending
 
