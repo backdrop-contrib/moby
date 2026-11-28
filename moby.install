@@ -253,3 +253,16 @@ function moby_update_1007() {
     return t('Tags from the app are now saved in the "Tags" vocabulary, in the %field field.', array('%field' => $field_name));
   }
 }
+
+/**
+ * Allow more than one authentication mechanism to be enabled.
+ */
+function moby_update_1008() {
+  $config = config('moby.settings');
+  if ($config->get('auth_mechanisms') === NULL) {
+    $name = $config->get('auth_mechanism');
+    $config->set('auth_mechanisms', array($name ? $name : 'password'));
+  }
+  $config->clear('auth_mechanism');
+  $config->save();
+}

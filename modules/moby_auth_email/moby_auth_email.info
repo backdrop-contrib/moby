@@ -1,0 +1,7 @@
+name = Moby email login
+description = Lets people log in to the Moby app with a code emailed to them.
+package = Web Services
+type = module
+backdrop = 1.x
+dependencies[] = moby
+configure = admin/config/services/moby

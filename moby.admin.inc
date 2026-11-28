@@ -561,19 +561,7 @@ function moby_settings_form_uploads_submit($form, &$form_state) {
  */
 function moby_settings_form_general($form_type) {
   $config = config('moby.settings');
-  $mechanism_options = array();
-  foreach (moby_get_auth_mechanisms() as $name => $mechanism) {
-    $mechanism_options[$name] = check_plain($mechanism['label']);
-  }
-  $form['auth_mechanism'] = array(
-    '#type' => 'select',
-    '#title' => t('Authentication mechanism'),
-    '#description' => t('How users log in from the app. Changing this does not log out devices that are already logged in.'),
-    '#options' => $mechanism_options,
-    '#default_value' => $config->get('auth_mechanism'),
-    '#required' => TRUE,
-    '#access' => count($mechanism_options) > 1,
-  );
+  $form['auth_mechanisms'] = moby_settings_form_auth_mechanisms();
   $form['default_status'] = array(
     '#type' => 'checkbox',
     '#title' => t('Publish posts by default'),
@@ -605,10 +593,123 @@ function moby_settings_form_general($form_type) {
 function moby_settings_form_general_submit($form, &$form_state) {
   $values = $form_state['values'];
   $config = config('moby.settings');
-  foreach (array('auth_mechanism', 'default_status', 'title_length', 'thumbnail_style') as $key) {
+  foreach (array('default_status', 'title_length', 'thumbnail_style') as $key) {
     $config->set($key, $values[$key]);
   }
+  $names = moby_settings_form_auth_mechanisms_value($values['auth_mechanisms']);
+  // The table is hidden when there is only one mechanism, which is then
+  // always enabled.
+  $all = array_keys(moby_get_auth_mechanisms());
+  if (!$names && count($all) == 1) {
+    $names = $all;
+  }
+  $config->set('auth_mechanisms', $names);
   $config->save();
+}
+
+/**
+ * Returns the authentication mechanisms table of the general section.
+ *
+ * Each row has a checkbox to enable the mechanism and a weight, which the
+ * table lets administrators drag to set the order. Enabled mechanisms that no
+ * longer exist are left out, and are removed when the form is saved.
+ */
+function moby_settings_form_auth_mechanisms() {
+  $mechanisms = moby_get_auth_mechanisms();
+  $enabled = array_values(array_intersect(moby_auth_mechanism_names(), array_keys($mechanisms)));
+  // Enabled mechanisms first, in their order, then the rest.
+  $order = array_merge($enabled, array_diff(array_keys($mechanisms), $enabled));
+
+  $element = array(
+    '#type' => 'fieldset',
+    '#title' => t('Logging in'),
+    '#description' => t('How users can log in from the app. The app offers the first enabled way, with the others under "Log in a different way". Turning one off does not log out devices that used it.'),
+    '#tree' => TRUE,
+    '#theme' => 'moby_auth_mechanisms_table',
+    '#element_validate' => array('moby_settings_form_auth_mechanisms_validate'),
+    // Only shown when there is a choice.
+    '#access' => count($mechanisms) > 1,
+  );
+  foreach ($order as $weight => $name) {
+    $mechanism = moby_get_auth_mechanism($name);
+    $description = isset($mechanisms[$name]['description']) ? $mechanisms[$name]['description'] : '';
+    if ($mechanism && $mechanism->getMinApiVersion() > MOBY_API_MIN_VERSION) {
+      $description .= ' ' . t('Apps from before API version @version do not offer it.', array('@version' => $mechanism->getMinApiVersion()));
+    }
+    $element[$name]['enabled'] = array(
+      '#type' => 'checkbox',
+      '#title' => check_plain($mechanisms[$name]['label']),
+      '#description' => filter_xss_admin(trim($description)),
+      '#default_value' => in_array($name, $enabled),
+    );
+    $element[$name]['weight'] = array(
+      '#type' => 'weight',
+      '#title' => t('Weight for @title', array('@title' => $mechanisms[$name]['label'])),
+      '#title_display' => 'invisible',
+      '#delta' => max(10, count($order)),
+      '#default_value' => $weight,
+      '#attributes' => array('class' => array('moby-auth-mechanism-weight')),
+    );
+  }
+  return $element;
+}
+
+/**
+ * Element validation handler: Requires an enabled authentication mechanism.
+ */
+function moby_settings_form_auth_mechanisms_validate($element, &$form_state) {
+  if ($element['#access'] && !moby_settings_form_auth_mechanisms_value(backdrop_array_get_nested_value($form_state['values'], $element['#parents']))) {
+    form_error($element, t('Enable at least one way of logging in.'));
+  }
+}
+
+/**
+ * Returns the enabled mechanisms' names, in order, from the table's values.
+ *
+ * @param array|null $values
+ *   The table's values, keyed by mechanism. NULL when the table was hidden,
+ *   which keeps the saved setting.
+ */
+function moby_settings_form_auth_mechanisms_value($values) {
+  if (!is_array($values)) {
+    return moby_auth_mechanism_names();
+  }
+  backdrop_sort($values, array('weight' => SORT_NUMERIC));
+  return array_keys(array_filter($values, function ($row) {
+    return !empty($row['enabled']);
+  }));
+}
+
+/**
+ * Returns HTML for the authentication mechanisms table, with draggable rows.
+ *
+ * @param array $variables
+ *   An associative array containing:
+ *   - element: The table's form element.
+ *
+ * @ingroup themeable
+ */
+function theme_moby_auth_mechanisms_table($variables) {
+  $element = $variables['element'];
+  $rows = array();
+  foreach (element_children($element) as $name) {
+    $rows[] = array(
+      'data' => array(
+        backdrop_render($element[$name]['enabled']),
+        backdrop_render($element[$name]['weight']),
+      ),
+      'class' => array('draggable'),
+    );
+  }
+  $id = 'moby-auth-mechanisms';
+  backdrop_add_tabledrag($id, 'order', 'sibling', 'moby-auth-mechanism-weight');
+  $table = theme('table', array(
+    'header' => array(t('Way of logging in'), t('Weight')),
+    'rows' => $rows,
+    'attributes' => array('id' => $id),
+  ));
+  // The fieldset wraps the table, as the element's #theme_wrappers.
+  return $table;
 }
 
 /**

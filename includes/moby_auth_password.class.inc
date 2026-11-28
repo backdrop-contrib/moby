@@ -18,10 +18,12 @@ class MobyAuthPassword extends MobyAuthMechanism {
    * {@inheritdoc}
    */
   public function getCredentialFields() {
+    $placeholder = NULL;
     switch (config_get('system.core', 'user_login_method')) {
       case USER_LOGIN_EMAIL_ONLY:
         $label = t('Email address');
         $type = 'email';
+        $placeholder = t('name@example.com');
         break;
       case USER_LOGIN_USERNAME_OR_EMAIL:
         $label = t('Username or email address');
@@ -37,6 +39,7 @@ class MobyAuthPassword extends MobyAuthMechanism {
         'label' => $label,
         'type' => $type,
         'required' => TRUE,
+        'placeholder' => $placeholder,
       ),
       array(
         'name' => 'password',

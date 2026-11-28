@@ -1,0 +1,50 @@
+<?php
+/**
+ * @file
+ * Install, update, and uninstall functions for Moby email login.
+ */
+
+/**
+ * Implements hook_enable().
+ *
+ * Offers email login in the app, after the ways already enabled.
+ */
+function moby_auth_email_enable() {
+  $names = moby_auth_mechanism_names();
+  if (!in_array('email', $names)) {
+    $names[] = 'email';
+    config_set('moby.settings', 'auth_mechanisms', $names);
+  }
+  backdrop_set_message(t('The Moby app now offers logging in with an emailed code. Change the order or turn it off at <a href="@url">Moby settings</a>.', array('@url' => url('admin/config/services/moby'))));
+}
+
+/**
+ * Implements hook_disable().
+ */
+function moby_auth_email_disable() {
+  $names = array_values(array_diff(moby_auth_mechanism_names(), array('email')));
+  // Without any other way, fall back to the username and password.
+  if (!$names) {
+    $names = array('password');
+  }
+  config_set('moby.settings', 'auth_mechanisms', $names);
+}
+
+/**
+ * Switch from emailed links to emailed codes.
+ *
+ * Logins in progress are no longer stored, so the module's own table goes.
+ */
+function moby_auth_email_update_1000() {
+  if (db_table_exists('moby_auth_email')) {
+    db_drop_table('moby_auth_email');
+  }
+  $config = config('moby_auth_email.settings');
+  if ($config->isNew()) {
+    $config->setData(array(
+      'max_attempts' => 3,
+      'code_lifetime' => 900,
+    ));
+    $config->save();
+  }
+}

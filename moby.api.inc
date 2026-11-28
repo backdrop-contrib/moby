@@ -111,7 +111,10 @@ function moby_api_meta() {
   }
 
   $config = config('moby.settings');
-  $mechanism = moby_get_auth_mechanism();
+  $mechanisms = array();
+  foreach (moby_get_enabled_auth_mechanisms() as $mechanism) {
+    $mechanisms[] = $mechanism->getDiscoveryInfo();
+  }
   $extensions = moby_media_extensions();
   $thumbnail_field = moby_video_thumbnail_field();
   $setup_issues = moby_setup_issues();
@@ -130,7 +133,8 @@ function moby_api_meta() {
       'favicon' => moby_favicon_url(),
     ),
     'setup_issues' => $setup_issues,
-    'auth' => $mechanism ? $mechanism->getDiscoveryInfo() : NULL,
+    // Every enabled mechanism the app can use, the default first.
+    'auth_mechanisms' => $mechanisms,
     'limits' => array(
       'max_upload_size' => moby_max_upload_size(),
       'max_media_per_post' => moby_max_media_per_post(),
@@ -204,7 +208,7 @@ function moby_setup_issues() {
   $config = config('moby.settings');
 
   if (!moby_get_auth_mechanism()) {
-    $add('auth_unavailable', 'error', t('Logging in from the app is not available, because the site\'s authentication mechanism is missing.'));
+    $add('auth_unavailable', 'error', t('Logging in from the app is not available, because none of the site\'s authentication mechanisms can be used by this app.'));
   }
 
   $node_type = $config->get('node_type');
@@ -285,8 +289,8 @@ function moby_setup_issues() {
 /**
  * Page callback: POST|DELETE /api/moby/auth/token
  *
- * POST exchanges a username and password for an API token. DELETE revokes the
- * token used to authenticate the request.
+ * POST exchanges credentials for an API token, or starts or polls a pending
+ * login. DELETE revokes the token used to authenticate the request.
  */
 function moby_api_auth_token() {
   if (func_num_args()) {
@@ -315,17 +319,34 @@ function moby_api_auth_token_create() {
   if ($data === FALSE) {
     return moby_error(400, 'invalid_json', t('The request body must be a JSON object.'));
   }
-  $mechanism = moby_get_auth_mechanism();
-  if (!$mechanism) {
-    watchdog('moby', 'The configured authentication mechanism %name is not available.', array('%name' => config_get('moby.settings', 'auth_mechanism')), WATCHDOG_ERROR);
+  $enabled = moby_get_enabled_auth_mechanisms();
+  if (!$enabled) {
+    watchdog('moby', 'None of the enabled authentication mechanisms (%names) are available.', array('%names' => implode(', ', moby_auth_mechanism_names())), WATCHDOG_ERROR);
     return moby_error(503, 'auth_unavailable', t('Logging in is not currently available.'));
+  }
+  // Without a mechanism, the default is used.
+  if (!isset($data['mechanism'])) {
+    $mechanism = reset($enabled);
+  }
+  elseif (is_string($data['mechanism']) && isset($enabled[$data['mechanism']])) {
+    $mechanism = $enabled[$data['mechanism']];
+  }
+  else {
+    return moby_error(422, 'validation_failed', t('This way of logging in is not available on this site.'), 'mechanism');
   }
 
   try {
     $account = $mechanism->authenticate($data);
   }
   catch (MobyAuthException $e) {
-    return moby_error($e->getStatus(), $e->getErrorCode(), $e->getMessage(), $e->getField());
+    // A restarting error ends the login: the app goes back to the first form.
+    $extra = $e->isRestart() ? array('restart' => TRUE) : array();
+    return moby_error($e->getStatus(), $e->getErrorCode(), $e->getMessage(), $e->getField(), array(), $extra);
+  }
+  // The mechanism needs another form, such as for a code it emailed. The app
+  // shows it, and sends it back with the step's request ID.
+  if ($account instanceof MobyAuthStep) {
+    return moby_response(array('step' => $account->toArray()), 202);
   }
 
   // Check the account can post before issuing a token it could not use. The

@@ -1,0 +1,7 @@
+name = Moby login test
+description = For testing the Moby apps only: adds a three-step login, with a password, a mock emailed code, and three security questions. Don't enable on a live site.
+package = Web Services
+type = module
+backdrop = 1.x
+dependencies[] = moby
+configure = admin/config/services/moby

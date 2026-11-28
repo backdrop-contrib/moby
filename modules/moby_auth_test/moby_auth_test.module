@@ -1,0 +1,49 @@
+<?php
+/**
+ * @file
+ * A three-step login for testing how the Moby apps handle login steps.
+ *
+ * It imitates multi-factor authentication:
+ *
+ * 1. The username and password, checked as by the username and password
+ *    mechanism.
+ * 2. A 6-digit code "emailed" to the account. No email is sent: the step's
+ *    description shows the code.
+ * 3. Three security questions, whose answers the step's description shows.
+ *
+ * Steps 2 and 3 each allow MOBY_AUTH_TEST_MAX_ATTEMPTS wrong answers. After
+ * too many wrong codes, the login restarts. After too many wrong answers, the
+ * account is locked out of this mechanism for 10 minutes too.
+ */
+
+/**
+ * How many wrong answers each step allows.
+ */
+define('MOBY_AUTH_TEST_MAX_ATTEMPTS', 3);
+
+/**
+ * How long the account is locked out after too many wrong answers, in
+ * seconds.
+ */
+define('MOBY_AUTH_TEST_LOCKOUT', 600);
+
+/**
+ * Implements hook_autoload_info().
+ */
+function moby_auth_test_autoload_info() {
+  return array(
+    'MobyAuthTest' => 'includes/moby_auth_test.class.inc',
+  );
+}
+
+/**
+ * Implements hook_moby_auth_info().
+ */
+function moby_auth_test_moby_auth_info() {
+  $mechanisms['test'] = array(
+    'label' => t('Test multi-step login'),
+    'description' => t('For testing the apps only: the username and password, then a code the app shows, then three security questions whose answers it shows.'),
+    'class' => 'MobyAuthTest',
+  );
+  return $mechanisms;
+}

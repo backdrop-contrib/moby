@@ -107,6 +107,22 @@ These were considered before writing the carousel from scratch:
 Native scroll snapping gives touch behavior as good as these libraries, so the
 carousel only needed a small script for the buttons, dots, and ARIA.
 
+### Logging in
+
+By default, the app logs in with a username (or email address) and password.
+The included **Moby email login** module (`moby_auth_email`) adds logging in
+with a 6-digit code emailed to the user. The site needs to be able to send
+email.
+
+The included **Moby login test** module (`moby_auth_test`) adds a three-step
+test login: the password, a code that the app shows instead of emailing it,
+and three security questions. It is for testing the apps only, so don't
+enable it on a live site.
+
+When more than one way of logging in is available, choose which are enabled
+under **Logging in** on the settings page, and drag them into order. The app
+shows the first one, with the others under "Log in a different way".
+
 ### API
 
 The REST API is described in [API.md](https://github.com/quicksketch/moby_docs/blob/main/API.md), with the rest of
@@ -116,7 +132,26 @@ the [Moby documentation](https://github.com/quicksketch/moby_docs).
 
 Other modules can provide authentication mechanisms with
 `hook_moby_auth_info()`. See `moby.api.php` and
-`includes/moby_auth.class.inc`.
+`includes/moby_auth.class.inc`. A mechanism with more than one form returns
+a `MobyAuthStep`. `MobyAuthRequest` carries its state between steps, in a
+signed ID, and counts wrong answers with flood control.
+`modules/moby_auth_email` and `modules/moby_auth_test` are examples.
+
+### Tests
+
+The test cases in the **Moby** group log in through the REST API as the apps
+do:
+
+- **Multi-step login API** (`tests/`), with the three steps of the Moby login
+  test module.
+- **Email login API** (`modules/moby_auth_email/tests/`), with codes emailed
+  by the Moby email login module.
+
+Both extend `MobyApiTestCase`, in `tests/moby_test_case.test`, which makes
+requests as the apps do. Enable the **Testing** module to run them at
+`admin/config/development/testing`, or from the command line:
+
+    php core/scripts/run-tests.sh --url http://localhost --class MobyAuthStepsTestCase,MobyAuthEmailTestCase
 
 ### Status
 

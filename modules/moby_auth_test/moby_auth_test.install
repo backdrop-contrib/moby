@@ -1,0 +1,31 @@
+<?php
+/**
+ * @file
+ * Install, update, and uninstall functions for Moby login test.
+ */
+
+/**
+ * Implements hook_enable().
+ *
+ * Offers the test login in the app, after the ways already enabled.
+ */
+function moby_auth_test_enable() {
+  $names = moby_auth_mechanism_names();
+  if (!in_array('test', $names)) {
+    $names[] = 'test';
+    config_set('moby.settings', 'auth_mechanisms', $names);
+  }
+  backdrop_set_message(t('The Moby app now offers a three-step test login. It is for testing the apps only, so disable it before the site goes live.'), 'warning');
+}
+
+/**
+ * Implements hook_disable().
+ */
+function moby_auth_test_disable() {
+  $names = array_values(array_diff(moby_auth_mechanism_names(), array('test')));
+  // Without any other way, fall back to the username and password.
+  if (!$names) {
+    $names = array('password');
+  }
+  config_set('moby.settings', 'auth_mechanisms', $names);
+}

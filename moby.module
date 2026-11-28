@@ -16,17 +16,18 @@
  * Moby share the numbering: a module claims version N only once it implements
  * every change up to N.
  */
-define('MOBY_API_VERSION', 1);
+define('MOBY_API_VERSION', 2);
 
 /**
  * The oldest version of the REST API this module still answers. Older
  * requests are refused with 426 api_version_unsupported.
  */
-define('MOBY_API_MIN_VERSION', 1);
+define('MOBY_API_MIN_VERSION', 2);
 
 /**
  * The base path of all REST API endpoints. Clients send the API version they
- * were built for in the "api" query parameter, such as ?api=1.
+ * were built for in the "api" query parameter, such as ?api=2. Requests
+ * without one are answered as the newest version.
  */
 define('MOBY_API_PATH', 'api/moby');
 
@@ -170,6 +171,8 @@ function moby_autoload_info() {
   return array(
     'MobyAuthMechanism' => 'includes/moby_auth.class.inc',
     'MobyAuthException' => 'includes/moby_auth.class.inc',
+    'MobyAuthStep' => 'includes/moby_auth.class.inc',
+    'MobyAuthRequest' => 'includes/moby_auth_request.class.inc',
     'MobyAuthPassword' => 'includes/moby_auth_password.class.inc',
   );
 }
@@ -202,18 +205,57 @@ function moby_get_auth_mechanisms() {
 }
 
 /**
+ * Returns the machine names of the enabled authentication mechanisms.
+ *
+ * @return array
+ *   Machine names, in the order the app offers them. The first is the
+ *   default. Mechanisms whose module has since been disabled are included.
+ */
+function moby_auth_mechanism_names() {
+  $names = config_get('moby.settings', 'auth_mechanisms');
+  return is_array($names) ? array_values($names) : array();
+}
+
+/**
+ * Returns the enabled authentication mechanisms that apps can use.
+ *
+ * @param int|null $api_version
+ *   (optional) Leave out mechanisms that apps for API versions older than
+ *   this can't use. Defaults to the version of the current request.
+ *
+ * @return MobyAuthMechanism[]
+ *   Mechanisms keyed by machine name, in the order the app offers them. The
+ *   first is the default. Mechanisms that no longer exist are left out.
+ */
+function moby_get_enabled_auth_mechanisms($api_version = NULL) {
+  if (!isset($api_version)) {
+    $api_version = moby_api_version();
+  }
+  $enabled = array();
+  foreach (moby_auth_mechanism_names() as $name) {
+    $mechanism = moby_get_auth_mechanism($name);
+    if ($mechanism && $mechanism->getMinApiVersion() <= $api_version) {
+      $enabled[$name] = $mechanism;
+    }
+  }
+  return $enabled;
+}
+
+/**
  * Returns an instance of an authentication mechanism.
  *
  * @param string|null $name
- *   (optional) The machine name of the mechanism. Defaults to the mechanism
- *   configured at admin/config/services/moby.
+ *   (optional) The machine name of the mechanism. Defaults to the default
+ *   mechanism for the current request: the first enabled one that the app can
+ *   use.
  *
  * @return MobyAuthMechanism|false
  *   The mechanism, or FALSE if it does not exist or its class is invalid.
  */
 function moby_get_auth_mechanism($name = NULL) {
   if (!isset($name)) {
-    $name = config_get('moby.settings', 'auth_mechanism');
+    $enabled = moby_get_enabled_auth_mechanisms();
+    return $enabled ? reset($enabled) : FALSE;
   }
   $mechanisms = moby_get_auth_mechanisms();
   if (empty($mechanisms[$name]['class']) || !is_subclass_of($mechanisms[$name]['class'], 'MobyAuthMechanism')) {
@@ -671,6 +713,10 @@ function moby_theme() {
       ),
       'template' => 'templates/moby-carousel',
     ) + $base,
+    'moby_auth_mechanisms_table' => array(
+      'render element' => 'element',
+      'file' => 'moby.admin.inc',
+    ),
   );
 }
 
@@ -986,17 +1032,95 @@ function moby_max_media_per_post() {
  *     not use text formats.
  *   - html: Whether descriptions are HTML. This is FALSE for fields without
  *     text formats, and for formats that escape all HTML.
+ *   - tags: The formatting tags the format keeps, from
+ *     moby_description_tags(), which the apps may use in descriptions. Empty
+ *     when descriptions aren't HTML.
  */
 function moby_description_format() {
-  $info = array('format' => NULL, 'html' => FALSE);
+  $info = array('format' => NULL, 'html' => FALSE, 'tags' => array());
   $field_name = config_get('moby.settings', 'mapping.description.field');
   $instance = $field_name ? field_info_instance('node', $field_name, config_get('moby.settings', 'node_type')) : FALSE;
   if ($instance && !empty($instance['settings']['text_processing'])) {
     $info['format'] = config_get('moby.settings', 'mapping.description.format');
     $format = filter_format_load($info['format']);
     $info['html'] = $format && empty($format->filters['filter_html_escape']->status);
+    if ($info['html']) {
+      $info['tags'] = moby_description_tags($format);
+    }
   }
   return $info;
+}
+
+/**
+ * Returns the formatting tags the apps know.
+ *
+ * Where a style has more than one tag, the apps use the first one a format
+ * allows, in this order.
+ */
+function moby_description_known_tags() {
+  return array('p', 'br', 'strong', 'b', 'em', 'i', 'u', 's', 'del', 'strike', 'a');
+}
+
+/**
+ * Returns the formatting tags a text format keeps, of those the apps know.
+ *
+ * A link counts only if its "href" attribute is kept too.
+ *
+ * @param object $format
+ *   The text format.
+ *
+ * @return array
+ *   Tag names, in the order of moby_description_known_tags().
+ */
+function moby_description_tags($format) {
+  $known = moby_description_known_tags();
+  $restrictions = filter_format_allowed_html($format);
+  // TRUE means the format doesn't limit HTML.
+  if ($restrictions === TRUE) {
+    return $known;
+  }
+  $allowed = isset($restrictions['allowed']) ? $restrictions['allowed'] : array();
+  $forbidden = isset($restrictions['forbidden']) ? $restrictions['forbidden'] : array();
+  // Tags are limited either by a list of allowed tags, or by a list of
+  // forbidden ones. "*" holds attribute rules for every tag, not a tag. Empty
+  // lists mean no HTML is allowed.
+  $allow_list = array_diff_key($allowed, array('*' => TRUE)) || !$forbidden;
+  $tags = array();
+  foreach ($known as $tag) {
+    if (in_array($tag, $forbidden, TRUE) || ($allow_list && !isset($allowed[$tag]))) {
+      continue;
+    }
+    if ($tag === 'a' && !moby_attribute_allowed($allowed, 'a', 'href')) {
+      continue;
+    }
+    $tags[] = $tag;
+  }
+  return $tags;
+}
+
+/**
+ * Returns whether an attribute is kept on a tag, per filter restrictions.
+ *
+ * @param array $allowed
+ *   The "allowed" list from filter_format_allowed_html().
+ * @param string $tag
+ *   The tag name.
+ * @param string $attribute
+ *   The attribute name.
+ */
+function moby_attribute_allowed(array $allowed, $tag, $attribute) {
+  // Rules for every tag, such as filter_html's ban on "style" and "on*".
+  if (isset($allowed['*'][$attribute]) && $allowed['*'][$attribute] === FALSE) {
+    return FALSE;
+  }
+  // Without a rule for the tag, as with a list of forbidden tags, its
+  // attributes aren't limited.
+  $rules = isset($allowed[$tag]) ? $allowed[$tag] : TRUE;
+  if (is_bool($rules)) {
+    // TRUE allows any attribute, and FALSE none.
+    return $rules;
+  }
+  return !empty($rules[$attribute]) || !empty($rules['*']);
 }
 
 /**
@@ -1147,12 +1271,13 @@ function moby_api_access($level) {
  * parameter.
  *
  * @return int
- *   The requested version. Requests without one are treated as version 1.
+ *   The requested version. Requests without a valid one are answered as the
+ *   newest version.
  */
 function moby_api_requested_version() {
   $version = &backdrop_static(__FUNCTION__);
   if (!isset($version)) {
-    $version = isset($_GET['api']) && ctype_digit((string) $_GET['api']) ? (int) $_GET['api'] : 1;
+    $version = isset($_GET['api']) && ctype_digit((string) $_GET['api']) ? (int) $_GET['api'] : MOBY_API_VERSION;
   }
   return $version;
 }
@@ -1214,11 +1339,13 @@ function moby_response($body, $status = 200, array $headers = array()) {
  *   (optional) The request field that caused the error, such as "media[0]".
  * @param array $headers
  *   (optional) Additional HTTP headers, keyed by header name.
+ * @param array $extra
+ *   (optional) More properties of the error object, such as "restart".
  *
  * @return array
  *   A response array.
  */
-function moby_error($status, $code, $message, $field = NULL, array $headers = array()) {
+function moby_error($status, $code, $message, $field = NULL, array $headers = array(), array $extra = array()) {
   $error = array(
     'code' => $code,
     'message' => $message,
@@ -1226,6 +1353,7 @@ function moby_error($status, $code, $message, $field = NULL, array $headers = ar
   if (isset($field)) {
     $error['field'] = $field;
   }
+  $error += $extra;
   return moby_response(array('error' => $error), $status, $headers);
 }
 
@@ -1300,6 +1428,7 @@ function moby_status_text($status) {
   $phrases = array(
     200 => 'OK',
     201 => 'Created',
+    202 => 'Accepted',
     204 => 'No Content',
     400 => 'Bad Request',
     401 => 'Unauthorized',
@@ -1307,6 +1436,7 @@ function moby_status_text($status) {
     404 => 'Not Found',
     405 => 'Method Not Allowed',
     409 => 'Conflict',
+    410 => 'Gone',
     413 => 'Payload Too Large',
     415 => 'Unsupported Media Type',
     426 => 'Upgrade Required',

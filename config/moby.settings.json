@@ -2,7 +2,9 @@
     "_config_name": "moby.settings",
     "setup_complete": false,
     "node_type": "",
-    "auth_mechanism": "password",
+    "auth_mechanisms": [
+        "password"
+    ],
     "default_status": 1,
     "title_length": 80,
     "max_video_size": "",

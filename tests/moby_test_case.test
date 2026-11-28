@@ -1,0 +1,158 @@
+<?php
+/**
+ * @file
+ * Base class for tests of the Moby REST API.
+ */
+
+/**
+ * Makes REST API requests as the Moby apps make them, and checks the results.
+ *
+ * Requests are JSON to and from the API, with the API version in the "api"
+ * query parameter, and a bearer token when the app would send one. Test cases
+ * for Moby and its submodules extend this, by including this file with
+ * require_once.
+ */
+abstract class MobyApiTestCase extends BackdropWebTestCase {
+
+  /**
+   * The minimal profile: the API needs no content types or fields to log in.
+   *
+   * @var string
+   */
+  protected $profile = 'testing';
+
+  /**
+   * Sends a request to the API, as the app does.
+   *
+   * @param string $method
+   *   The HTTP method.
+   * @param string $path
+   *   The path after the API's base path, such as "/auth/token".
+   * @param array|null $body
+   *   (optional) The JSON body.
+   * @param string|null $token
+   *   (optional) The API token to authenticate with.
+   *
+   * @return array
+   *   The decoded JSON response, or an empty array for no body.
+   */
+  protected function apiRequest($method, $path, $body = NULL, $token = NULL) {
+    $headers = array('Accept: application/json');
+    if (isset($body)) {
+      $headers[] = 'Content-Type: application/json';
+    }
+    if (isset($token)) {
+      $headers[] = 'Authorization: Bearer ' . $token;
+    }
+    $options = array(
+      CURLOPT_URL => url(MOBY_API_PATH . $path, array('absolute' => TRUE, 'query' => array('api' => MOBY_API_VERSION))),
+      CURLOPT_CUSTOMREQUEST => $method,
+      CURLOPT_HTTPHEADER => $headers,
+      CURLOPT_NOBODY => FALSE,
+    );
+    if ($method === 'GET') {
+      $options[CURLOPT_HTTPGET] = TRUE;
+    }
+    else {
+      $options[CURLOPT_POST] = TRUE;
+      $options[CURLOPT_POSTFIELDS] = isset($body) ? json_encode($body) : '';
+    }
+    $content = $this->curlExec($options);
+    $data = json_decode($content, TRUE);
+    return is_array($data) ? $data : array();
+  }
+
+  /**
+   * Sends a login form to POST /auth/token, as the app does.
+   *
+   * @param string $mechanism
+   *   The mechanism's machine name.
+   * @param array $values
+   *   The form's field values.
+   * @param string|null $request_id
+   *   (optional) For a later step, its request ID.
+   *
+   * @return array
+   *   The decoded JSON response.
+   */
+  protected function loginRequest($mechanism, array $values, $request_id = NULL) {
+    $body = array('mechanism' => $mechanism) + $values + array('device_name' => 'Simpletest phone');
+    if (isset($request_id)) {
+      $body['request_id'] = $request_id;
+    }
+    return $this->apiRequest('POST', '/auth/token', $body);
+  }
+
+  /**
+   * Returns the names of the login mechanisms GET /meta lists, in order.
+   */
+  protected function discoveredMechanisms() {
+    $meta = $this->apiRequest('GET', '/meta');
+    $this->assertResponse(200);
+    $names = array();
+    foreach ($meta['auth_mechanisms'] as $mechanism) {
+      $names[$mechanism['mechanism']] = $mechanism;
+    }
+    return $names;
+  }
+
+  /**
+   * Returns a 6-digit code other than the given one.
+   */
+  protected function wrongCode($code) {
+    return $code === '000000' ? '111111' : '000000';
+  }
+
+  /**
+   * Asserts that a response is an error, and whether it restarts the login.
+   *
+   * @param array $response
+   *   The decoded response.
+   * @param int $status
+   *   The expected HTTP status.
+   * @param string $code
+   *   The expected error code.
+   * @param bool $restart
+   *   Whether the error must restart the login.
+   * @param string|null $field
+   *   (optional) The field the error must name.
+   */
+  protected function assertError(array $response, $status, $code, $restart, $field = NULL) {
+    $this->assertResponse($status);
+    $this->assertEqual(isset($response['error']['code']) ? $response['error']['code'] : NULL, $code, format_string('The error code is %code.', array('%code' => $code)));
+    $this->assertTrue(!empty($response['error']['message']), 'The error has a message for the user.');
+    $this->assertEqual(!empty($response['error']['restart']), $restart, $restart ? 'The error restarts the login.' : 'The error keeps the current step.');
+    if (isset($field)) {
+      $this->assertEqual(isset($response['error']['field']) ? $response['error']['field'] : NULL, $field, format_string('The error names the %field field.', array('%field' => $field)));
+    }
+  }
+
+  /**
+   * Asserts that a login step has the expected heading, button, and fields.
+   *
+   * @param array $step
+   *   The "step" property of a 202 response.
+   * @param string $title
+   *   The expected heading.
+   * @param string $submit_label
+   *   The expected button label.
+   * @param array $fields
+   *   The expected field types, keyed by field name, in order.
+   * @param int $lifetime
+   *   (optional) The most seconds the login may take.
+   */
+  protected function assertStep(array $step, $title, $submit_label, array $fields, $lifetime = 900) {
+    $this->assertTrue(!empty($step['request_id']) && is_string($step['request_id']), 'The step has a request ID.');
+    $this->assertEqual($step['title'], $title, format_string('The step is titled %title.', array('%title' => $title)));
+    $this->assertEqual($step['submit_label'], $submit_label, 'The step has its button label.');
+    $this->assertTrue(!empty($step['description']), 'The step has a description.');
+    $this->assertTrue($step['expires_in'] > 0 && $step['expires_in'] <= $lifetime, 'The step says when the login expires.');
+    $actual = array();
+    foreach ($step['fields'] as $field) {
+      $actual[$field['name']] = $field['type'];
+      $this->assertTrue(!empty($field['label']) && $field['required'] === TRUE && array_key_exists('placeholder', $field), format_string('The %name field is described in full.', array('%name' => $field['name'])));
+    }
+    $this->assertIdentical($actual, $fields, 'The step has the expected fields, in order.');
+  }
+
+}

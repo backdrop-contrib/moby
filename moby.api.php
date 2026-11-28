@@ -14,8 +14,11 @@
  *
  * An authentication mechanism verifies the credentials sent to
  * POST /api/moby/auth/token. Once a mechanism returns a user account,
- * Moby issues an API token for it. One mechanism is active at a
- * time, selected at admin/config/services/moby.
+ * Moby issues an API token for it. Sites enable one or more mechanisms at
+ * admin/config/services/moby, in the order the app offers them; the first is
+ * the default. A newly declared mechanism is not enabled until an
+ * administrator enables it, unless the module adds it to the
+ * "auth_mechanisms" list in moby.settings itself.
  *
  * @return array
  *   An array of mechanisms keyed by machine name. Each value is an array

@@ -1,0 +1,5 @@
+[MobyAuthStepsTestCase]
+name = Multi-step login API
+description = Logs in through the REST API as the Moby apps do, with the three steps of the Moby login test module: a password, an emailed code, and security questions.
+group = Moby
+file = moby_auth.test

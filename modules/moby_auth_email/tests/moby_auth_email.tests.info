@@ -1,0 +1,5 @@
+[MobyAuthEmailTestCase]
+name = Email login API
+description = Logs in through the REST API as the Moby apps do, with a code emailed by the Moby email login module.
+group = Moby
+file = moby_auth_email.test

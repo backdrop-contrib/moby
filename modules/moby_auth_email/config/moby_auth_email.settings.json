@@ -1,0 +1,5 @@
+{
+    "_config_name": "moby_auth_email.settings",
+    "max_attempts": 3,
+    "code_lifetime": 900
+}

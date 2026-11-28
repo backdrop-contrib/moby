@@ -1,0 +1,268 @@
+<?php
+/**
+ * @file
+ * Tests for logging in with an emailed code through the Moby REST API.
+ */
+
+// The base class is part of Moby, which this module is inside of.
+require_once __DIR__ . '/../../../tests/moby_test_case.test';
+
+/**
+ * Tests the email mechanism: an email address, then the code emailed to it.
+ *
+ * The code is read from the email the site sends, which the test captures, as
+ * the user reads it from their inbox. See "Email login" in moby_docs/API.md.
+ */
+class MobyAuthEmailTestCase extends MobyApiTestCase {
+
+  /**
+   * The account that logs in.
+   *
+   * @var User
+   */
+  protected $account;
+
+  /**
+   * {@inheritdoc}
+   */
+  protected function setUp() {
+    parent::setUp(array('moby', 'moby_auth_email'));
+    $this->account = $this->backdropCreateUser(array('post via moby'));
+  }
+
+  /**
+   * Sends a step of the email login, as the app does.
+   */
+  protected function sendStep(array $values, $request_id = NULL) {
+    return $this->loginRequest('email', $values, $request_id);
+  }
+
+  /**
+   * Asks for a code for an address, and returns the code step.
+   */
+  protected function startLogin($mail = NULL) {
+    $response = $this->sendStep(array('email' => isset($mail) ? $mail : $this->account->mail));
+    $this->assertResponse(202, 'The email address answers with the code step.');
+    return isset($response['step']) ? $response['step'] : array();
+  }
+
+  /**
+   * Returns the login emails sent so far.
+   */
+  protected function loginMails() {
+    // The site under test records the emails it sends in its state.
+    $this->refreshVariables();
+    return $this->backdropGetMails(array('id' => 'moby_auth_email_login'));
+  }
+
+  /**
+   * Returns the code in the last login email to an address.
+   */
+  protected function codeSentTo($mail) {
+    $mails = $this->backdropGetMails(array('id' => 'moby_auth_email_login', 'to' => $mail));
+    $last = end($mails);
+    $this->assertTrue($last && preg_match('/^(\d{6}) is your Moby app login code/', $last['subject'], $matches), 'The email gives the code in its subject.');
+    return isset($matches[1]) ? $matches[1] : '';
+  }
+
+  /**
+   * Returns the data a request ID carries, which the app can read.
+   */
+  protected function requestData($request_id) {
+    list($payload) = explode('.', $request_id);
+    $values = json_decode(base64_decode(strtr($payload, '-_', '+/')), TRUE);
+    return isset($values['d']) ? $values['d'] : array();
+  }
+
+  /**
+   * Tests discovery: enabling the module offers email login, after the
+   * password, and disabling it takes it away.
+   */
+  public function testDiscovery() {
+    $mechanisms = $this->discoveredMechanisms();
+    $this->assertIdentical(array_keys($mechanisms), array('password', 'email'), 'Enabling the module adds email login after the password.');
+    $email = $mechanisms['email'];
+    $this->assertEqual($email['label'], 'Email a login code');
+    $this->assertEqual($email['submit_label'], 'Email me a code');
+    $this->assertTrue(!empty($email['description']), 'Email login has a description.');
+    $this->assertEqual(count($email['fields']), 1, 'Email login asks for one thing.');
+    $this->assertEqual($email['fields'][0]['name'], 'email');
+    $this->assertEqual($email['fields'][0]['type'], 'email', 'The field gets an email keyboard.');
+    $this->assertEqual($email['fields'][0]['placeholder'], 'name@example.com', 'The field has a placeholder.');
+
+    module_disable(array('moby_auth_email'));
+    $this->refreshVariables();
+    $this->assertIdentical(array_keys($this->discoveredMechanisms()), array('password'), 'Disabling the module takes email login away.');
+    $response = $this->sendStep(array('email' => $this->account->mail));
+    $this->assertError($response, 422, 'validation_failed', FALSE, 'mechanism');
+  }
+
+  /**
+   * Tests a login with an emailed code, with correctable mistakes.
+   */
+  public function testLogin() {
+    // An address that isn't one keeps the first form.
+    $response = $this->sendStep(array('email' => ''));
+    $this->assertError($response, 422, 'validation_failed', FALSE, 'email');
+    $response = $this->sendStep(array('email' => 'not an address'));
+    $this->assertError($response, 422, 'validation_failed', FALSE, 'email');
+    $this->assertEqual(count($this->loginMails()), 0, 'No email is sent for an invalid address.');
+
+    // The address, with spaces as a user might type it, sends a code.
+    $step = $this->startLogin('  ' . $this->account->mail . ' ');
+    $this->assertStep($step, 'Check your email', 'Log in', array('code' => 'number'));
+    $this->assertTrue(strpos($step['description'], $this->account->mail) !== FALSE, 'The step says which address the code went to.');
+
+    // One email, to the account, with the code and the device's name.
+    $mails = $this->loginMails();
+    $this->assertEqual(count($mails), 1, 'One login email is sent.');
+    $this->assertEqual($mails[0]['to'], $this->account->mail, 'The email goes to the account.');
+    // The body is wrapped, so a name can be split over two lines.
+    $body = preg_replace('/\s+/', ' ', $mails[0]['body']);
+    $this->assertTrue(strpos($body, 'Simpletest phone') !== FALSE, 'The email names the device that asked.');
+    $code = $this->codeSentTo($this->account->mail);
+    $this->assertTrue(strpos($body, $code) !== FALSE, 'The email gives the code in its body too.');
+    $this->assertTrue(strpos($step['request_id'], $code) === FALSE, 'The request ID does not contain the code.');
+    $this->assertFalse(in_array($code, $this->requestData($step['request_id']), TRUE), 'The request ID holds a hash of the code, not the code.');
+
+    // A code that isn't 6 digits isn't counted as a wrong code.
+    $response = $this->sendStep(array('code' => '12345'), $step['request_id']);
+    $this->assertError($response, 422, 'validation_failed', FALSE, 'code');
+
+    // A wrong code says how many tries are left.
+    $response = $this->sendStep(array('code' => $this->wrongCode($code)), $step['request_id']);
+    $this->assertError($response, 401, 'invalid_code', FALSE, 'code');
+    $this->assertTrue(strpos($response['error']['message'], '2 more times') !== FALSE, 'A wrong code leaves 2 more tries.');
+
+    // The right code logs in.
+    $response = $this->sendStep(array('code' => $code), $step['request_id']);
+    $this->assertResponse(201, 'The right code logs in.');
+    $this->assertEqual($response['user']['id'], $this->account->uid, 'The token is for the account the code was sent to.');
+    $token = $response['token'];
+    $mechanism = db_query('SELECT mechanism FROM {moby_token} WHERE uid = :uid', array(':uid' => $this->account->uid))->fetchField();
+    $this->assertEqual($mechanism, 'email', 'The token records that it was issued by email login.');
+
+    // A code works once.
+    $response = $this->sendStep(array('code' => $code), $step['request_id']);
+    $this->assertError($response, 410, 'login_expired', TRUE);
+
+    // The token works, as the app then uses it.
+    $me = $this->apiRequest('GET', '/me', NULL, $token);
+    $this->assertResponse(200);
+    $this->assertEqual($me['name'], $this->account->name, 'The token authenticates the account.');
+  }
+
+  /**
+   * Tests that too many wrong codes restart the login, so a new code must be
+   * sent.
+   */
+  public function testTooManyWrongCodes() {
+    $step = $this->startLogin();
+    $this->loginMails();
+    $code = $this->codeSentTo($this->account->mail);
+    $wrong = $this->wrongCode($code);
+
+    $this->sendStep(array('code' => $wrong), $step['request_id']);
+    $response = $this->sendStep(array('code' => $wrong), $step['request_id']);
+    $this->assertError($response, 401, 'invalid_code', FALSE, 'code');
+    $this->assertTrue(strpos($response['error']['message'], '1 more time') !== FALSE, 'The second wrong code leaves 1 more try.');
+    $response = $this->sendStep(array('code' => $wrong), $step['request_id']);
+    $this->assertError($response, 401, 'too_many_attempts', TRUE, 'code');
+    $this->assertEqual($response['error']['message'], 'Invalid email code. Please log in again.', 'The site says why the login restarted.');
+
+    // The emailed code no longer works.
+    $response = $this->sendStep(array('code' => $code), $step['request_id']);
+    $this->assertError($response, 410, 'login_expired', TRUE);
+
+    // Starting again sends a new code, which works.
+    $step = $this->startLogin();
+    $this->assertEqual(count($this->loginMails()), 2, 'Starting again sends a new email.');
+    $this->sendStep(array('code' => $this->codeSentTo($this->account->mail)), $step['request_id']);
+    $this->assertResponse(201, 'The new code logs in.');
+  }
+
+  /**
+   * Tests that the site's settings control the tries and the code's life.
+   */
+  public function testSettings() {
+    config_set('moby_auth_email.settings', 'max_attempts', 1);
+    config_set('moby_auth_email.settings', 'code_lifetime', 120);
+
+    $step = $this->startLogin();
+    $this->assertTrue($step['expires_in'] > 0 && $step['expires_in'] <= 120, 'The code lasts as long as the setting says.');
+    $this->assertTrue(strpos($step['description'], '2 minutes') !== FALSE, 'The step says how long the code lasts.');
+    $this->loginMails();
+    $code = $this->codeSentTo($this->account->mail);
+
+    // With 1 try allowed, the first wrong code restarts the login.
+    $response = $this->sendStep(array('code' => $this->wrongCode($code)), $step['request_id']);
+    $this->assertError($response, 401, 'too_many_attempts', TRUE, 'code');
+  }
+
+  /**
+   * Tests that the API doesn't reveal which addresses have accounts.
+   */
+  public function testUnknownAndBlockedAddresses() {
+    $known = $this->startLogin();
+    $this->assertEqual(count($this->loginMails()), 1);
+
+    // An address no account uses gets the same step, but no email.
+    $unknown = $this->startLogin('nobody@example.com');
+    $this->assertStep($unknown, 'Check your email', 'Log in', array('code' => 'number'));
+    $this->assertEqual(count($this->loginMails()), 1, 'No email is sent to an address no account uses.');
+    $this->assertIdentical(array_keys($this->requestData($unknown['request_id'])), array_keys($this->requestData($known['request_id'])), 'The request ID holds the same data whether or not an account uses the address.');
+    $this->assertFalse(in_array($this->account->uid, $this->requestData($known['request_id'])), 'The request ID does not hold the account.');
+
+    // No code logs in to it, and wrong codes count as for any address.
+    $response = $this->sendStep(array('code' => '123456'), $unknown['request_id']);
+    $this->assertError($response, 401, 'invalid_code', FALSE, 'code');
+
+    // A blocked account gets the same step, but no email.
+    $blocked = $this->backdropCreateUser(array('post via moby'));
+    $blocked->status = 0;
+    $blocked->save();
+    $this->startLogin($blocked->mail);
+    $this->assertEqual(count($this->loginMails()), 1, 'No email is sent to a blocked account.');
+
+    // An account blocked after its code was sent can't log in with it.
+    $step = $this->startLogin();
+    $this->loginMails();
+    $code = $this->codeSentTo($this->account->mail);
+    $this->account->status = 0;
+    $this->account->save();
+    $response = $this->sendStep(array('code' => $code), $step['request_id']);
+    $this->assertError($response, 401, 'invalid_credentials', TRUE);
+  }
+
+  /**
+   * Tests the limits on how many codes can be asked for.
+   */
+  public function testRateLimits() {
+    // 5 codes an hour for one address.
+    for ($i = 1; $i <= 5; $i++) {
+      $this->startLogin();
+    }
+    $response = $this->sendStep(array('email' => $this->account->mail));
+    $this->assertError($response, 429, 'too_many_requests', FALSE, 'email');
+    $this->assertEqual(count($this->loginMails()), 5, 'No more codes are emailed to the address.');
+
+    // 10 an hour from one IP address, whichever addresses they're for.
+    for ($i = 1; $i <= 5; $i++) {
+      $this->startLogin("other$i@example.com");
+    }
+    $response = $this->sendStep(array('email' => 'another@example.com'));
+    $this->assertError($response, 429, 'too_many_requests', FALSE, 'email');
+  }
+
+  /**
+   * Tests that an account without permission to post gets no token.
+   */
+  public function testPermission() {
+    $account = $this->backdropCreateUser(array());
+    $step = $this->startLogin($account->mail);
+    $this->loginMails();
+    $response = $this->sendStep(array('code' => $this->codeSentTo($account->mail)), $step['request_id']);
+    $this->assertError($response, 403, 'forbidden', FALSE);
+  }
+
+}

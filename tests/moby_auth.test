@@ -1,0 +1,306 @@
+<?php
+/**
+ * @file
+ * Tests for logging in through the Moby REST API.
+ */
+
+require_once __DIR__ . '/moby_test_case.test';
+
+/**
+ * Tests multi-step logins, using the Moby login test module.
+ *
+ * Each request is made as the Moby apps make it: JSON to and from the API,
+ * with the API version in the "api" query parameter. The test mechanism has
+ * three steps:
+ *
+ * 1. The username and password.
+ * 2. A 6-digit code, which its step's description shows instead of emailing.
+ * 3. Three security questions, whose answers the description shows.
+ *
+ * See "Login steps" and "Test login" in moby_docs/API.md.
+ */
+class MobyAuthStepsTestCase extends MobyApiTestCase {
+
+  /**
+   * The account that logs in, with its plain text password in "pass_raw".
+   *
+   * @var User
+   */
+  protected $account;
+
+  /**
+   * The right answers to the security questions, as the app would send them.
+   *
+   * @var array
+   */
+  protected $answers = array(
+    'pet' => 'Rex',
+    'color' => 'blue',
+    'city' => ' PARIS ',
+  );
+
+  /**
+   * {@inheritdoc}
+   */
+  protected function setUp() {
+    parent::setUp(array('moby', 'moby_auth_test'));
+    $this->account = $this->backdropCreateUser(array('post via moby'));
+  }
+
+  /**
+   * Sends a step of the test login, as the app does.
+   *
+   * @param array $values
+   *   The step's field values.
+   * @param string|null $request_id
+   *   The step's request ID, or NULL for the first step.
+   *
+   * @return array
+   *   The decoded JSON response.
+   */
+  protected function sendStep(array $values, $request_id = NULL) {
+    return $this->loginRequest('test', $values, $request_id);
+  }
+
+  /**
+   * Sends the username and password, and returns the code step.
+   */
+  protected function startLogin() {
+    $response = $this->sendStep(array(
+      'username' => $this->account->name,
+      'password' => $this->account->pass_raw,
+    ));
+    $this->assertResponse(202, 'The password step answers with another step.');
+    return $response['step'];
+  }
+
+  /**
+   * Returns the code a code step's description shows.
+   */
+  protected function codeFrom(array $step) {
+    preg_match('/the code is (\d{6})/', $step['description'], $matches);
+    $this->assertTrue(!empty($matches[1]), 'The code step shows its code.');
+    return isset($matches[1]) ? $matches[1] : '';
+  }
+
+  /**
+   * Sends the password and the code, and returns the questions step.
+   */
+  protected function reachQuestions() {
+    $step = $this->startLogin();
+    $response = $this->sendStep(array('code' => $this->codeFrom($step)), $step['request_id']);
+    $this->assertResponse(202, 'The right code answers with the questions step.');
+    return $response['step'];
+  }
+
+  /**
+   * Tests discovery: the test mechanism is offered, after the password.
+   */
+  public function testDiscovery() {
+    $meta = $this->apiRequest('GET', '/meta');
+    $this->assertResponse(200);
+    $this->assertEqual($this->backdropGetHeader('Moby-API-Version'), MOBY_API_VERSION, 'The response says which API version it is.');
+    $names = array();
+    foreach ($meta['auth_mechanisms'] as $mechanism) {
+      $names[] = $mechanism['mechanism'];
+    }
+    $this->assertIdentical($names, array('password', 'test'), 'Enabling the test module adds its mechanism after the password.');
+    $test = $meta['auth_mechanisms'][1];
+    $this->assertEqual($test['submit_label'], 'Continue', 'The test mechanism has its own button label.');
+    $this->assertTrue(strpos($test['description'], 'Step 1 of 3') === 0, 'The test mechanism describes its steps.');
+    $this->assertEqual($test['fields'][1]['type'], 'password', 'The first step asks for the password.');
+    $this->assertFalse(isset($meta['auth']), 'The old "auth" property is gone.');
+  }
+
+  /**
+   * Tests a login through all three steps, with correctable mistakes.
+   */
+  public function testLogin() {
+    // Step 1, with the wrong password, keeps the first form.
+    $response = $this->sendStep(array('username' => $this->account->name, 'password' => 'wrong'));
+    $this->assertError($response, 401, 'invalid_credentials', FALSE, 'password');
+
+    // Step 1, then the code step.
+    $step = $this->startLogin();
+    $this->assertStep($step, 'Check your email', 'Continue', array('code' => 'number'));
+    $this->assertTrue(strpos($step['description'], 'Step 2 of 3') === 0, 'The code step says it is the second.');
+    $this->assertTrue(strpos($step['request_id'], $this->codeFrom($step)) === FALSE, 'The request ID does not contain the code.');
+    $code_step = $step;
+
+    // A code that isn't 6 digits isn't counted as a wrong code.
+    $response = $this->sendStep(array('code' => '12ab'), $step['request_id']);
+    $this->assertError($response, 422, 'validation_failed', FALSE, 'code');
+
+    // A wrong code says how many tries are left.
+    $response = $this->sendStep(array('code' => $this->wrongCode($this->codeFrom($step))), $step['request_id']);
+    $this->assertError($response, 401, 'invalid_code', FALSE, 'code');
+    $this->assertTrue(strpos($response['error']['message'], '2 more times') !== FALSE, 'A wrong code leaves 2 more tries.');
+
+    // The right code, with spaces, as a user might type it.
+    $code = $this->codeFrom($step);
+    $response = $this->sendStep(array('code' => substr($code, 0, 3) . ' ' . substr($code, 3)), $step['request_id']);
+    $this->assertResponse(202, 'The right code answers with the next step.');
+    $step = $response['step'];
+    $this->assertStep($step, 'Security questions', 'Log in', array('pet' => 'text', 'color' => 'text', 'city' => 'text'));
+    $this->assertNotEqual($step['request_id'], $code_step['request_id'], 'Each step has its own request ID.');
+
+    // The code step's ID no longer works.
+    $response = $this->sendStep(array('code' => $code), $code_step['request_id']);
+    $this->assertError($response, 410, 'login_expired', TRUE);
+
+    // A missing answer isn't counted as a wrong answer.
+    $response = $this->sendStep(array('pet' => 'Rex', 'color' => 'blue'), $step['request_id']);
+    $this->assertError($response, 422, 'validation_failed', FALSE, 'city');
+
+    // A wrong answer names its field.
+    $response = $this->sendStep(array('city' => 'Rome') + $this->answers, $step['request_id']);
+    $this->assertError($response, 401, 'invalid_credentials', FALSE, 'city');
+    $this->assertTrue(strpos($response['error']['message'], '2 more times') !== FALSE, 'A wrong answer leaves 2 more tries.');
+
+    // The right answers, in any case and with spaces, get a token.
+    $response = $this->sendStep($this->answers, $step['request_id']);
+    $this->assertResponse(201, 'The right answers log in.');
+    $this->assertTrue(strpos($response['token'], 'moby_') === 0, 'The login returns a token.');
+    $this->assertEqual($response['token_type'], 'Bearer');
+    $this->assertEqual($response['user']['id'], $this->account->uid, 'The token is for the account that logged in.');
+    $token = $response['token'];
+    $record = db_query('SELECT device_name, mechanism FROM {moby_token} WHERE uid = :uid', array(':uid' => $this->account->uid))->fetchObject();
+    $this->assertEqual($record->device_name, 'Simpletest phone', 'The token has the device name.');
+    $this->assertEqual($record->mechanism, 'test', 'The token records the mechanism it was issued by.');
+
+    // The finished step's ID can't log in again.
+    $response = $this->sendStep($this->answers, $step['request_id']);
+    $this->assertError($response, 410, 'login_expired', TRUE);
+
+    // The token works, as the app then uses it.
+    $me = $this->apiRequest('GET', '/me', NULL, $token);
+    $this->assertResponse(200);
+    $this->assertEqual($me['name'], $this->account->name, 'The token authenticates the account.');
+
+    // Logging out revokes it.
+    $this->apiRequest('DELETE', '/auth/token', NULL, $token);
+    $this->assertResponse(204, 'Logging out revokes the token.');
+    $response = $this->apiRequest('GET', '/me', NULL, $token);
+    $this->assertError($response, 401, 'unauthorized', FALSE);
+  }
+
+  /**
+   * Tests that too many wrong codes restart the login.
+   */
+  public function testTooManyWrongCodes() {
+    $step = $this->startLogin();
+    $code = $this->codeFrom($step);
+    $wrong = $this->wrongCode($code);
+
+    $this->sendStep(array('code' => $wrong), $step['request_id']);
+    $this->assertResponse(401);
+    $response = $this->sendStep(array('code' => $wrong), $step['request_id']);
+    $this->assertError($response, 401, 'invalid_code', FALSE, 'code');
+    $this->assertTrue(strpos($response['error']['message'], '1 more time') !== FALSE, 'The second wrong code leaves 1 more try.');
+
+    // The third restarts the login, with the site's message.
+    $response = $this->sendStep(array('code' => $wrong), $step['request_id']);
+    $this->assertError($response, 401, 'too_many_attempts', TRUE);
+    $this->assertEqual($response['error']['message'], 'Invalid email code. Please log in again.', 'The site says why the login restarted.');
+
+    // Even the right code no longer works with that ID.
+    $response = $this->sendStep(array('code' => $code), $step['request_id']);
+    $this->assertError($response, 410, 'login_expired', TRUE);
+
+    // Starting again works, with a new code.
+    $this->startLogin();
+  }
+
+  /**
+   * Tests that too many wrong answers restart the login and lock it out.
+   */
+  public function testLockout() {
+    $step = $this->reachQuestions();
+    $wrong = array('pet' => 'Fido') + $this->answers;
+    for ($i = 1; $i <= 2; $i++) {
+      $response = $this->sendStep($wrong, $step['request_id']);
+      $this->assertError($response, 401, 'invalid_credentials', FALSE, 'pet');
+    }
+    $response = $this->sendStep($wrong, $step['request_id']);
+    $this->assertError($response, 429, 'too_many_attempts', TRUE);
+    $this->assertEqual($response['error']['message'], 'Too many invalid login attempts, please wait 10 minutes and try again.', 'The site says how long to wait.');
+
+    // The first step answers the same until the lockout ends, even with the
+    // right password.
+    $response = $this->sendStep(array('username' => $this->account->name, 'password' => $this->account->pass_raw));
+    $this->assertError($response, 429, 'too_many_attempts', TRUE);
+
+    // The password mechanism isn't locked out.
+    $response = $this->apiRequest('POST', '/auth/token', array(
+      'mechanism' => 'password',
+      'username' => $this->account->name,
+      'password' => $this->account->pass_raw,
+    ));
+    $this->assertResponse(201, 'Other mechanisms still work during the lockout.');
+
+    // Once the lockout ends, the test login works again.
+    flood_clear_event('moby_auth_test_lockout', $this->account->uid);
+    $this->startLogin();
+  }
+
+  /**
+   * Tests that request IDs can't be forged, altered, or used elsewhere.
+   */
+  public function testRequestIds() {
+    $step = $this->startLogin();
+    $code = $this->codeFrom($step);
+
+    // An ID that was never issued.
+    $response = $this->sendStep(array('code' => $code), 'not-a-request-id');
+    $this->assertError($response, 410, 'login_expired', TRUE);
+
+    // An ID altered to skip to the questions.
+    list($payload, $signature) = explode('.', $step['request_id']);
+    $values = json_decode(base64_decode(strtr($payload, '-_', '+/')), TRUE);
+    $this->assertEqual($values['s'], 'code', 'The ID holds the step.');
+    $this->assertFalse(in_array($code, $values['d'], TRUE), 'The ID holds a hash of the code, not the code.');
+    $values['s'] = 'questions';
+    $forged = rtrim(strtr(base64_encode(json_encode($values)), '+/', '-_'), '=') . '.' . $signature;
+    $response = $this->sendStep($this->answers, $forged);
+    $this->assertError($response, 410, 'login_expired', TRUE);
+
+    // An ID sent with a mechanism other than its own.
+    $response = $this->apiRequest('POST', '/auth/token', array(
+      'mechanism' => 'password',
+      'request_id' => $step['request_id'],
+      'code' => $code,
+    ));
+    $this->assertResponse(422, 'The password mechanism ignores request IDs, and wants a username.');
+
+    // The ID still works for its own login.
+    $response = $this->sendStep(array('code' => $code), $step['request_id']);
+    $this->assertResponse(202, 'The untouched ID still works.');
+  }
+
+  /**
+   * Tests requests the API refuses before any mechanism runs.
+   */
+  public function testRefusedRequests() {
+    // A mechanism the site hasn't enabled.
+    $response = $this->apiRequest('POST', '/auth/token', array('mechanism' => 'email', 'email' => $this->account->mail));
+    $this->assertError($response, 422, 'validation_failed', FALSE, 'mechanism');
+
+    // A body that isn't JSON.
+    $this->curlExec(array(
+      CURLOPT_URL => url(MOBY_API_PATH . '/auth/token', array('absolute' => TRUE, 'query' => array('api' => MOBY_API_VERSION))),
+      CURLOPT_CUSTOMREQUEST => 'POST',
+      CURLOPT_POST => TRUE,
+      CURLOPT_POSTFIELDS => 'not json',
+      CURLOPT_HTTPHEADER => array('Content-Type: application/json'),
+    ));
+    $this->assertResponse(400, 'A body that is not JSON is refused.');
+
+    // An account without permission to post logs in through every step,
+    // but gets no token.
+    $this->account = $this->backdropCreateUser(array());
+    $step = $this->reachQuestions();
+    $response = $this->sendStep($this->answers, $step['request_id']);
+    $this->assertError($response, 403, 'forbidden', FALSE);
+  }
+
+}
